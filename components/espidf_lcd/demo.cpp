@@ -17,6 +17,7 @@ extern "C" void espidf_lcd_demo(void) {
     ESP_LOGE(TAG, "I2C init failed");
     return;
   }
+  vTaskDelay(pdMS_TO_TICKS(500));
   if (lcd.begin(16, 2, 0) != ESP_OK) {
     ESP_LOGE(TAG, "LCD begin failed");
     return;
@@ -24,7 +25,7 @@ extern "C" void espidf_lcd_demo(void) {
 
   lcd.clear();
   lcd.setCursor(0, 0);
-  const char *msg1 = "00Hello, Wallter!";
+  const char *msg1 = "Hello, Wallter!";
   for (const char *p = msg1; *p; ++p) lcd.write((uint8_t)*p);
 
   lcd.setCursor(0, 1);
