@@ -1,5 +1,5 @@
 idf_component_register(
     SRCS "main.c"
     INCLUDE_DIRS "."
-    REQUIRES espidf_lcd
+    REQUIRES espidf_lcd cytron_md
 )
