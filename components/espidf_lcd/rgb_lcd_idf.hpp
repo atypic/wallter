@@ -83,6 +83,8 @@ public:
   // Mid-level (as in original)
   esp_err_t command(uint8_t value);
   esp_err_t write(uint8_t value);
+  // Convenience: print a C-string to the LCD using write()
+  esp_err_t print(const char *str);
 
   // RGB controls
   esp_err_t setReg(uint8_t reg, uint8_t dat);

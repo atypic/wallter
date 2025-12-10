@@ -151,6 +151,15 @@ esp_err_t rgb_lcd_idf::write(uint8_t value) {
   return i2c_send_bytes(LCD_ADDRESS, dta, sizeof(dta));
 }
 
+esp_err_t rgb_lcd_idf::print(const char *str) {
+  if (!str) return ESP_OK;
+  while (*str) {
+    ESP_RETURN_ON_ERROR(write((uint8_t)*str), TAG, "write");
+    ++str;
+  }
+  return ESP_OK;
+}
+
 // RGB control
 esp_err_t rgb_lcd_idf::setReg(uint8_t reg, uint8_t dat) {
   uint8_t dta[2] = {reg, dat};
