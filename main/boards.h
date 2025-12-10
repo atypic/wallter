@@ -97,7 +97,7 @@ CytronMD motors[NUM_MOTORS] = {CytronMD(PWM_DIR, 2, 22),  // MASTER
 #endif
 
 // -----------------------------------------------------------------------------
-// ARCTIC CYTRON
+// ARCTIC CYTRON (ESP-IDF GPIO mapping)
 // -----------------------------------------------------------------------------
 #if defined(BOARD_TYPE) && (BOARD_TYPE == BOARD_TYPE_ARCTIC_CYTRON)
 
@@ -124,15 +124,19 @@ bool g_has_keypad = false;
 
 #define LOCK_TIME_MS 10 * 60
 
-//                          master: 1  slv:  2
-unsigned int HAL_CNT[NUM_MOTORS] = {30, 31};  // black wires
-unsigned int HAL_CLK[NUM_MOTORS] = {28, 29};  // white wires
+// HAL encoder pins (use input-capable GPIOs)
+// CLK: GPIO32, GPIO33; CNT: GPIO34, GPIO35
+unsigned int HAL_CLK[NUM_MOTORS] = {32, 33};
+unsigned int HAL_CNT[NUM_MOTORS] = {34, 35};
 
-#define BUTTON_EXTEND_PIN 53
-#define BUTTON_RETRACT_PIN 52
+// Button pins
+#define BUTTON_EXTEND_PIN 18
+#define BUTTON_RETRACT_PIN 19
 
-MotorDriver motors[NUM_MOTORS] = {MotorDriver(2, 22),  // MASTER
-                                  MotorDriver(3, 23)};
+// Motor driver pins (PWM/DIR)
+unsigned int HAL_PWM[NUM_MOTORS] = {25, 26};
+unsigned int HAL_DIR[NUM_MOTORS] = {27, 14};
+
 #endif
 
 // -----------------------------------------------------------------------------

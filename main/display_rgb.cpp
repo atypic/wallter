@@ -12,7 +12,7 @@ Display::Display()
 
 void Display::init(void) {
     // Basic I2C init on default pins (adjust as needed)
-    lcd.init_i2c(I2C_NUM_0, GPIO_NUM_21, GPIO_NUM_22, 100000);
+    lcd.init_i2c(I2C_NUM_0, GPIO_NUM_13, GPIO_NUM_14, 100000);
     lcd.begin(16, 2, LCD_5x8DOTS);
     lcd.setRGB(LCD_BACKLIGHT_R, LCD_BACKLIGHT_G, LCD_BACKLIGHT_B);
     lcd.clear();
