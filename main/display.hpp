@@ -42,16 +42,20 @@ class Display {
     void update_manual_view(long pos_ticks);
     void show_short_message(char *line1, char *line2, uint32_t time_ms);
     void cycle_colors();
+    void startup_animation();
 
   private:
     rgb_lcd_idf lcd;
     display_views_t current_view;
     display_views_t next_view;
+    display_views_t previous_view;
     uint32_t last_update_ms;
     uint32_t refresh_interval_ms;
     int32_t short_view_time_ms;
+    uint32_t short_view_start_ms;
     bool pending_refresh;
-    char view_buffers[LCD_NUM_VIEWS][2][16];
+    // Each line needs space for 16 chars + NUL terminator
+    char view_buffers[LCD_NUM_VIEWS][2][17];
 };
 
 #endif  // DISPLAY_HPP

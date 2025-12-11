@@ -72,8 +72,9 @@ esp_err_t rgb_lcd_idf::begin(uint8_t cols, uint8_t lines, uint8_t dotsize) {
 
 // High-level API
 esp_err_t rgb_lcd_idf::clear() {
-  ESP_RETURN_ON_ERROR(command(LCD_CLEARDISPLAY), TAG, "clear");
   vTaskDelay(pdMS_TO_TICKS(10));
+  ESP_RETURN_ON_ERROR(command(LCD_CLEARDISPLAY), TAG, "clear");
+  vTaskDelay(pdMS_TO_TICKS(20));
   return ESP_OK;
 }
 esp_err_t rgb_lcd_idf::home() {

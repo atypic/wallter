@@ -101,7 +101,8 @@ class MotorDriver {
     // Idle tracking
     mutable uint32_t last_idle_check_ms = 0;
     mutable int32_t last_idle_position  = 0;
-    mutable uint32_t idle_accum_ms      = 0;
+    mutable uint32_t idle_accum_ms      = 0; // deprecated; retained for ABI
+    mutable uint32_t last_move_ms       = 0; // timestamp of last step change
 };
 
 #endif

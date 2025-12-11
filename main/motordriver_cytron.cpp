@@ -84,42 +84,47 @@ bool MotorDriver::errorCheck(uint32_t steps_in,
     return ok;
 }
 
-void MotorDriver::incrementStepIn() { steps_in.fetch_add(1, std::memory_order_relaxed); }
-void MotorDriver::incrementStepOut() { steps_out.fetch_add(1, std::memory_order_relaxed); }
+void MotorDriver::incrementStepIn() {
+    steps_in.fetch_add(1, std::memory_order_relaxed);
+    // Mirror old driver: stepping IN decrements position
+    position -= 1;
+    last_move_ms = (uint32_t)(esp_timer_get_time() / 1000ULL);
+}
+void MotorDriver::incrementStepOut() {
+    steps_out.fetch_add(1, std::memory_order_relaxed);
+    // Mirror old driver: stepping OUT increments position
+    position += 1;
+    last_move_ms = (uint32_t)(esp_timer_get_time() / 1000ULL);
+}
 uint32_t MotorDriver::getStepsIn() const { return steps_in.load(std::memory_order_relaxed); }
 uint32_t MotorDriver::getStepsOut() const { return steps_out.load(std::memory_order_relaxed); }
 void MotorDriver::resetSteps(bool /*all*/) { steps_in.store(0, std::memory_order_relaxed); steps_out.store(0, std::memory_order_relaxed); }
 
-void MotorDriver::incrementPosition(int32_t delta) { position += delta; }
+void MotorDriver::incrementPosition(int32_t delta) { 
+    position += delta; }
 void MotorDriver::setPosition(int32_t pos) { position = pos; }
 int32_t MotorDriver::getPosition() const { return position; }
 
 bool MotorDriver::isIdle(uint32_t window_ms) const {
     uint32_t now = (uint32_t)(esp_timer_get_time() / 1000ULL);
-    if (last_idle_check_ms == 0) {
-        last_idle_check_ms = now;
-        last_idle_position = position;
+    if (last_move_ms == 0) {
+        // Establish baseline if never moved
         return false;
     }
-    uint32_t elapsed = now - last_idle_check_ms;
-    if (elapsed < window_ms) return false;
-    bool idle = (position == last_idle_position);
-    last_idle_position = position;
-    if (idle) {
-        idle_accum_ms += elapsed;
-    } else {
-        idle_accum_ms = 0;
-        last_idle_check_ms = now;
-    }
-    return idle;
+    return (now - last_move_ms) >= window_ms;
 }
 
-uint32_t MotorDriver::getIdleDurationMs() const { return idle_accum_ms; }
+uint32_t MotorDriver::getIdleDurationMs() const {
+    uint32_t now = (uint32_t)(esp_timer_get_time() / 1000ULL);
+    if (last_move_ms == 0) {
+        return 0;
+    }
+    return now - last_move_ms;
+}
 
 void MotorDriver::resetIdle() {
-    last_idle_check_ms = 0;
-    idle_accum_ms = 0;
-    last_idle_position = position;
+    uint32_t now = (uint32_t)(esp_timer_get_time() / 1000ULL);
+    last_move_ms = now;
 }
 
 void MotorDriver::pidBegin(double kp, double ki, double kd) {

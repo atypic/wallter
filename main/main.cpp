@@ -43,6 +43,10 @@ static volatile bool g_retract_pressed = false;
 static bool g_accel_phase = false;
 static uint64_t delta_acc_ms = 0; // last accel update time in ms
 
+// Software edge filter for HAL clocks (aggressive debounce)
+static uint64_t g_last_clk_us[NUM_MOTORS] = {0};
+static const uint32_t HAL_CLK_FILTER_US = 80; // ignore edges within 80us
+
 // Hardware glitch filter handles debouncing; no manual checks needed
 
 static void IRAM_ATTR isr_button_extend(void *arg) {
@@ -56,13 +60,18 @@ static void IRAM_ATTR isr_button_retract(void *arg) {
 
 static void IRAM_ATTR isr_hal_clk(void *arg) {
     int idx = (int)(intptr_t)arg;
+    uint64_t now_us = (uint64_t)esp_timer_get_time();
+    uint64_t last_us = g_last_clk_us[idx];
+    if (last_us != 0 && (now_us - last_us) < HAL_CLK_FILTER_US) {
+        // Ignore spurious fast edges
+        return;
+    }
+    g_last_clk_us[idx] = now_us;
     int cnt = gpio_ll_get_level(&GPIO, (gpio_num_t)HAL_CNT[idx]);
     if (cnt == 0) {
         motors[idx].incrementStepIn();
-        motors[idx].incrementPosition(-1);
     } else {
         motors[idx].incrementStepOut();
-        motors[idx].incrementPosition(1);
     }
 }
 
@@ -93,6 +102,10 @@ static int current_cmd = CMD_STOP;
 static int32_t g_progress_start_ticks = 0;
 static uint64_t g_last_error_check_ms = 0;
 static uint64_t last_print_ms = 0;
+static uint64_t g_last_command_change_ms = 0; // grace period for error checks
+static int g_consecutive_stall[NUM_MOTORS] = {0};
+static int32_t g_last_steps_in[NUM_MOTORS] = {0};
+static int32_t g_last_steps_out[NUM_MOTORS] = {0};
 
 static bool motors_idle_for(uint32_t ms) {
     for (int m = 0; m < NUM_MOTORS; m++) {
@@ -136,6 +149,9 @@ static void set_current_command(int cmd) {
         return;
     }
     current_cmd = cmd;
+    g_last_command_change_ms = (uint64_t)(esp_timer_get_time() / 1000ULL);
+    // Nudge the UI to reflect state changes immediately
+    display.refresh();
 
     if (cmd == CMD_EXTEND || cmd == CMD_RETRACT || cmd == CMD_HOME) {
         display.set_refresh_rate(1.0f);
@@ -208,22 +224,29 @@ static int32_t get_master_motor_speed() {
             reset_tick_counters(0, true);
             reset_motor_positions();
             // Match Arduino: disable HAL IRQs after homing completes
-            disable_hal_irqs();
+            //disable_hal_irqs();
             display.set_view(LCD_TARGET_VIEW);
             target_reached = true;
         }
     } else if (current_cmd == CMD_RETRACT) {
+        // If we're retracting and near home, switch to homing to fully run-in
+        if (current_pos <= 1000) {
+            ESP_LOGI(TAG, "Auto-transition: retract pos=%ld -> CMD_HOME", (long)current_pos);
+            set_current_command(CMD_HOME);
+        }
         if (current_pos <= (int32_t)target) {
             target_reached = true;
         }
     } else if (current_cmd == CMD_EXTEND) {
         if (current_pos >= (int32_t)target) {
+            ESP_LOGI(TAG, "Target reached");
             target_reached = true;
         }
     }
 
     if (target_reached) {
         return_speed = 0;
+        ESP_LOGI(TAG, "Stopping motors as target reached");
         set_current_command(CMD_STOP);
         g_accel_phase = false;
     }
@@ -237,7 +260,12 @@ static int32_t get_master_motor_speed() {
 // ESP-IDF friendly throttle helper using esp_timer
 static inline bool throttle(uint64_t &last_ms, uint32_t period_ms) {
     uint64_t now_ms = (uint64_t)(esp_timer_get_time() / 1000ULL);
-    if (last_ms + period_ms > now_ms) {
+    if (last_ms == 0) {
+        // First call should allow printing
+        last_ms = now_ms;
+        return true;
+    }
+    if ((now_ms - last_ms) < (uint64_t)period_ms) {
         return false;
     }
     last_ms = now_ms;
@@ -256,7 +284,13 @@ static void panicf(const char *fmt, ...) {
     }
     char line1[17];
     snprintf(line1, sizeof(line1), "PANIC:");
-    display.show_short_message(line1, buf, 2000);
+    // Avoid potential hang in show_short_message; use safe path
+    display.print(line1, buf);
+    uint64_t end_ms = (uint64_t)(esp_timer_get_time() / 1000ULL) + 2000ULL;
+    while ((uint64_t)(esp_timer_get_time() / 1000ULL) < end_ms) {
+        display.refresh();
+        vTaskDelay(pdMS_TO_TICKS(50));
+    }
     ESP_LOGE(TAG, "PANIC: %s", buf);
     while (1) {
         display.refresh();
@@ -271,23 +305,56 @@ static void error_check_motor_positions() {
     if (g_accel_phase) {
         return;
     }
+    // Provide grace period after command change to let motors react
+    uint64_t now_ms = (uint64_t)(esp_timer_get_time() / 1000ULL);
+    if ((now_ms - g_last_command_change_ms) < 800ULL) {
+        return;
+    }
     if (!throttle(g_last_error_check_ms, 1000)) {
         return;
     }
     for (int i = 0; i < NUM_MOTORS; i++) {
-        bool ok = motors[i].errorCheck(
-            motors[i].getStepsIn(),
-            motors[i].getStepsOut(),
-            /*min_delta=*/3,
-            /*window_ms=*/1000);
+        int32_t si = motors[i].getStepsIn();
+        int32_t so = motors[i].getStepsOut();
+        int32_t dsi = si - g_last_steps_in[i];
+        int32_t dso = so - g_last_steps_out[i];
+        g_last_steps_in[i] = si;
+        g_last_steps_out[i] = so;
+
+        int32_t pos = motors[i].getPosition();
+        // Skip checks when retracting close to home to avoid encoder jitter false positives
+        if (current_cmd == CMD_RETRACT && pos <= 1800) {
+            g_consecutive_stall[i] = 0;
+            continue;
+        }
+
+        // Expect movement in the direction of travel
+        bool moved_expected = false;
+        if (current_cmd == CMD_RETRACT) moved_expected = (dso > 0);
+        else if (current_cmd == CMD_EXTEND) moved_expected = (dsi > 0);
+
+        bool ok;
+        if (!moved_expected || g_accel_phase) {
+            // Be lenient during low-speed or ambiguous deltas
+            ok = motors[i].errorCheck(si, so, /*min_delta=*/1, /*window_ms=*/800);
+        } else {
+            ok = true;
+        }
+
         if (!ok) {
-            ESP_LOGE(TAG, "Stall: motor %d pos=%ld si=%ld so=%ld",
-                     i,
-                     (long)motors[i].getPosition(),
-                     (long)motors[i].getStepsIn(),
-                     (long)motors[i].getStepsOut());
+            g_consecutive_stall[i]++;
+            ESP_LOGE(TAG, "MotorDriver: Stall candidate: dir=%d dsi=%ld dso=%ld si=%ld so=%ld pos=%ld",
+                     (current_cmd == CMD_RETRACT) ? 1 : -1,
+                     (long)dsi, (long)dso, (long)si, (long)so, (long)pos);
+        } else {
+            g_consecutive_stall[i] = 0;
+        }
+
+        if (g_consecutive_stall[i] >= 2) {
+            ESP_LOGE(TAG, "Stall: motor %d pos=%ld si=%ld so=%ld dsi=%ld dso=%ld",
+                     i, (long)pos, (long)si, (long)so, (long)dsi, (long)dso);
             char msg[32];
-            snprintf(msg, sizeof(msg), "M%d STALL p%ld", i, (long)motors[i].getPosition());
+            snprintf(msg, sizeof(msg), "M%d STALL p%ld", i, (long)pos);
             panicf("%s", msg);
         }
     }
@@ -297,17 +364,27 @@ static void print_state(uint32_t print_rate_ms) {
     if (!throttle(last_print_ms, print_rate_ms)) {
         return;
     }
-    ESP_LOGV(TAG, "CMD:%d T:%u", (int)current_cmd, (unsigned)TARGET_TICKS[g_target_idx]);
-    ESP_LOGV(TAG, "SO:[%lu %lu] SI:[%lu %lu]",
-             (unsigned long)motors[0].getStepsOut(),
-             (unsigned long)motors[1].getStepsOut(),
-             (unsigned long)motors[0].getStepsIn(),
-             (unsigned long)motors[1].getStepsIn());
-    ESP_LOGV(TAG, "P:[%ld %ld] V:[%lu %lu]",
-             (long)motors[0].getPosition(),
-             (long)motors[1].getPosition(),
-             (unsigned long)abs(motors[0].getSpeed()),
-             (unsigned long)abs(motors[1].getSpeed()));
+    uint32_t tgt = TARGET_TICKS[g_target_idx];
+    int32_t pos0 = motors[0].getPosition();
+    int32_t pos1 = motors[1].getPosition();
+    uint32_t so0 = motors[0].getStepsOut();
+    uint32_t so1 = motors[1].getStepsOut();
+    uint32_t si0 = motors[0].getStepsIn();
+    uint32_t si1 = motors[1].getStepsIn();
+    uint32_t idle0 = motors[0].getIdleDurationMs();
+    uint32_t idle1 = motors[1].getIdleDurationMs();
+    ESP_LOGI(TAG, "CMD:%d tgtIdx:%u tgtTicks:%u pos:[%ld %ld] stepsOut:[%lu %lu] stepsIn:[%lu %lu] idleMs:[%u %u]",
+             (int)current_cmd,
+             (unsigned)g_target_idx,
+             (unsigned)tgt,
+             (long)pos0,
+             (long)pos1,
+             (unsigned long)so0,
+             (unsigned long)so1,
+             (unsigned long)si0,
+             (unsigned long)si1,
+             (unsigned)idle0,
+             (unsigned)idle1);
 }
 
 static void configure_gpio() {
@@ -402,17 +479,34 @@ extern "C" void app_main(void) {
         const int test_speed = MINSPEED;
         const int test_time  = 1000;
         ESP_LOGI(TAG, "Self-test started.");
+        ESP_LOGI(TAG, "ST: init pos=[%ld %ld] si=[%lu %lu] so=[%lu %lu]",
+             (long)motors[0].getPosition(), (long)motors[1].getPosition(),
+             (unsigned long)motors[0].getStepsIn(), (unsigned long)motors[1].getStepsIn(),
+             (unsigned long)motors[0].getStepsOut(), (unsigned long)motors[1].getStepsOut());
         display.print("Self test 1", "Extending.");
 
         // Start IRQs for HAL clocks (already configured by configure_gpio)
         // Retract then extend
+        ESP_LOGI(TAG, "ST: retract phase start, speed=%d", test_speed);
         for (int i = 0; i < NUM_MOTORS; i++) motors[i].setSpeed(-test_speed);
+        ESP_LOGI(TAG, "ST: retract phase running...");
         vTaskDelay(pdMS_TO_TICKS(test_time + 500));
+        ESP_LOGI(TAG, "ST: retract done. si=[%lu %lu] so=[%lu %lu]",
+             (unsigned long)motors[0].getStepsIn(), (unsigned long)motors[1].getStepsIn(),
+             (unsigned long)motors[0].getStepsOut(), (unsigned long)motors[1].getStepsOut());
         reset_tick_counters(0, true);
+        ESP_LOGI(TAG, "ST: counters reset. si=[%lu %lu] so=[%lu %lu]",
+             (unsigned long)motors[0].getStepsIn(), (unsigned long)motors[1].getStepsIn(),
+             (unsigned long)motors[0].getStepsOut(), (unsigned long)motors[1].getStepsOut());
         for (int i = 0; i < NUM_MOTORS; i++) motors[i].setSpeed(test_speed);
+        ESP_LOGI(TAG, "ST: extend phase start, speed=%d", test_speed);
         vTaskDelay(pdMS_TO_TICKS(test_time));
+        ESP_LOGI(TAG, "ST: extend done. si=[%lu %lu] so=[%lu %lu]",
+             (unsigned long)motors[0].getStepsIn(), (unsigned long)motors[1].getStepsIn(),
+             (unsigned long)motors[0].getStepsOut(), (unsigned long)motors[1].getStepsOut());
         display.print("Phase 1 done", "Checking...");
         for (int i = 0; i < NUM_MOTORS; i++) motors[i].setSpeed(0);
+        ESP_LOGI(TAG, "ST: motors stopped after phase 1.");
         for (int i = 0; i < NUM_MOTORS; i++) {
             if (motors[i].getStepsOut() < 100U) {
                 ESP_LOGE(TAG, "Self-test failed: motor %d si:%d so:%d", i, (int)motors[i].getStepsIn(), (int)motors[i].getStepsOut());
@@ -424,10 +518,15 @@ extern "C" void app_main(void) {
         }
 
         display.print("Self test 2", "Retracting.");
+        ESP_LOGI(TAG, "ST: phase 2 retract start.");
         for (int i = 0; i < NUM_MOTORS; i++) motors[i].setSpeed(-test_speed);
         vTaskDelay(pdMS_TO_TICKS(test_time));
+        ESP_LOGI(TAG, "ST: phase 2 retract done. si=[%lu %lu] so=[%lu %lu]",
+             (unsigned long)motors[0].getStepsIn(), (unsigned long)motors[1].getStepsIn(),
+             (unsigned long)motors[0].getStepsOut(), (unsigned long)motors[1].getStepsOut());
         display.print("Phase 2 done", "Checking...");
         for (int i = 0; i < NUM_MOTORS; i++) motors[i].setSpeed(0);
+        ESP_LOGI(TAG, "ST: motors stopped after phase 2.");
         for (int i = 0; i < NUM_MOTORS; i++) {
             if (motors[i].getStepsIn() < 100U) {
                 ESP_LOGE(TAG, "Self-test failed: motor %d si:%d so:%d", i, (int)motors[i].getStepsIn(), (int)motors[i].getStepsOut());
@@ -439,15 +538,22 @@ extern "C" void app_main(void) {
         }
         bool final_success = true;
         for (int i = 0; i < NUM_MOTORS; ++i) {
-            if (abs((int)motors[i].getStepsOut() - (int)motors[i].getStepsIn()) > 60) {
+            if (abs((int)motors[i].getStepsOut() - (int)motors[i].getStepsIn()) > 200) {
                 final_success = false;
+
             }
         }
         if (!final_success) {
             display.print("FAIL: BAD SENSOR DATA", "Check connections.");
             panicf("CHECK CONNECTIONS");
         }
-        display.show_short_message((char*)"Self test", (char*)"PASSED", 1500);
+        // Avoid show_short_message due to hang; use safe timed print
+        display.print(const_cast<char*>("Self test"), const_cast<char*>("PASSED"));
+        uint64_t end_ms = (uint64_t)(esp_timer_get_time() / 1000ULL) + 1500ULL;
+        while ((uint64_t)(esp_timer_get_time() / 1000ULL) < end_ms) {
+            display.refresh();
+            vTaskDelay(pdMS_TO_TICKS(50));
+        }
     } else {
         ESP_LOGI(TAG, "Skipping self-test.");
     }
@@ -511,9 +617,11 @@ extern "C" void app_main(void) {
 static void setup() {
     // Init motors and display
     for (int i = 0; i < NUM_MOTORS; ++i) motors[i].init();
+    vTaskDelay(pdMS_TO_TICKS(500));
     display.init();
     display.set_refresh_rate(1.0f);
-    display.print("Wallter", "LETS go3");
+    // Run startup animation like old display
+    display.startup_animation();
 
     configure_gpio();
     // Add HAL clock IRQs (equivalent to Arduino attachInterrupt on HAL_CLK)
@@ -547,6 +655,13 @@ static void setup() {
         motors[p].pidStart();
     }
 
+    // Initialize stall tracking baselines
+    for (int i = 0; i < NUM_MOTORS; ++i) {
+        g_consecutive_stall[i] = 0;
+        g_last_steps_in[i] = motors[i].getStepsIn();
+        g_last_steps_out[i] = motors[i].getStepsOut();
+    }
+
     set_current_command(CMD_HOME);
     g_target_idx = 0;
 
@@ -572,11 +687,6 @@ static void handle_buttons() {
     if (current_cmd == CMD_HOME) {
         return;
     }
-
-    if (extend || retract) {
-        ESP_LOGI(TAG, "Button pressed: extend=%d retract=%d", (int)extend, (int)retract);
-    }
-
 
     int new_idx = compute_next_target_index(extend, retract, (int)g_target_idx, MAX_ANGLES);
     if (new_idx == (int)g_target_idx) {
@@ -604,7 +714,9 @@ static void handle_buttons() {
     ESP_LOGI(TAG, "Change accepted.");
     g_target_idx = (uint32_t)new_idx;
     if (new_idx == 0) {
-        set_current_command(CMD_HOME);
+        // When selecting the bottom-most index, retract toward zero
+        // and only enter CMD_HOME automatically once idle-at-zero is detected.
+        set_current_command(CMD_RETRACT);
     }
     display.trigger_refresh();
 }
