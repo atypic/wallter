@@ -1,5 +1,10 @@
+#define BOARD_TYPE BOARD_TYPE_ARCTIC_CYTRON
 #include "display.hpp"
+#include "boards.h"
 #include "esp_timer.h"
+#include "esp_log.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 
 Display::Display()
     : lcd(),
@@ -11,11 +16,20 @@ Display::Display()
     pending_refresh(false) {}
 
 void Display::init(void) {
-    // Basic I2C init on default pins (adjust as needed)
-    lcd.init_i2c(I2C_NUM_0, GPIO_NUM_13, GPIO_NUM_14, 100000);
-    lcd.begin(16, 2, LCD_5x8DOTS);
-    lcd.setRGB(LCD_BACKLIGHT_R, LCD_BACKLIGHT_G, LCD_BACKLIGHT_B);
+    // Mirror the known-working demo exactly: pins, timing, params
+    const gpio_num_t SDA = GPIO_NUM_7;
+    const gpio_num_t SCL = GPIO_NUM_6;
+    if (lcd.init_i2c(I2C_NUM_0, SDA, SCL, 100000) != ESP_OK) {
+        ESP_LOGE("Display", "I2C init failed");
+        return;
+    }
+    vTaskDelay(pdMS_TO_TICKS(500));
+    if (lcd.begin(16, 2, 0) != ESP_OK) {
+        ESP_LOGE("Display", "LCD begin failed");
+        return;
+    }
     lcd.clear();
+    lcd.setRGB(LCD_BACKLIGHT_R, LCD_BACKLIGHT_G, LCD_BACKLIGHT_B);
 }
 
 void Display::print(const char *message, const char *line2) {

@@ -34,6 +34,11 @@ esp_err_t CytronMD::init(ledc_timer_t timer,
 }
 
 esp_err_t CytronMD::setup_gpio() {
+  ESP_LOGI("CytronMD", "setup_gpio pins: pin1=%d pin2=%d", (int)pin1_, (int)pin2_);
+  if (pin1_ < 0 || pin1_ >= GPIO_NUM_MAX || pin2_ < 0 || pin2_ >= GPIO_NUM_MAX) {
+    ESP_LOGE("CytronMD", "invalid GPIO pins: %d, %d", (int)pin1_, (int)pin2_);
+    return ESP_ERR_INVALID_ARG;
+  }
   gpio_config_t io = {};
   io.mode = GPIO_MODE_OUTPUT;
   io.intr_type = GPIO_INTR_DISABLE;

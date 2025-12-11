@@ -3,6 +3,7 @@
 #include "driver/gpio.h"
 #include "driver/gpio_filter.h"
 #include <stdarg.h>
+#include "hal/gpio_ll.h"
 #include <stdio.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -14,7 +15,9 @@
 #include "buttons.hpp"
 
 static const char *TAG = "main";
-
+// Forward declaration for button handler
+static void handle_buttons();
+static void setup();
 static Display display;
 static MotorDriver motors[NUM_MOTORS] = {
     MotorDriver(HAL_PWM[0], HAL_DIR[0]),
@@ -44,16 +47,16 @@ static uint64_t delta_acc_ms = 0; // last accel update time in ms
 
 static void IRAM_ATTR isr_button_extend(void *arg) {
     (void)arg;
-    g_extend_pressed = (gpio_get_level((gpio_num_t)BUTTON_EXTEND_PIN) == 0);
+    g_extend_pressed = (gpio_ll_get_level(&GPIO, (gpio_num_t)BUTTON_EXTEND_PIN) == 0);
 }
 static void IRAM_ATTR isr_button_retract(void *arg) {
     (void)arg;
-    g_retract_pressed = (gpio_get_level((gpio_num_t)BUTTON_RETRACT_PIN) == 0);
+    g_retract_pressed = (gpio_ll_get_level(&GPIO, (gpio_num_t)BUTTON_RETRACT_PIN) == 0);
 }
 
 static void IRAM_ATTR isr_hal_clk(void *arg) {
     int idx = (int)(intptr_t)arg;
-    int cnt = gpio_get_level((gpio_num_t)HAL_CNT[idx]);
+    int cnt = gpio_ll_get_level(&GPIO, (gpio_num_t)HAL_CNT[idx]);
     if (cnt == 0) {
         motors[idx].incrementStepIn();
         motors[idx].incrementPosition(-1);
@@ -329,37 +332,42 @@ static void configure_gpio() {
     gpio_config_t clk = {};
     clk.mode = GPIO_MODE_INPUT;
     clk.intr_type = GPIO_INTR_POSEDGE;
+    // Ensure HAL clock pins use pull-ups
     clk.pull_up_en = GPIO_PULLUP_ENABLE;
+    clk.pull_down_en = GPIO_PULLDOWN_DISABLE;
     uint64_t mask = 0;
     for (int i = 0; i < NUM_MOTORS; ++i) mask |= (1ULL << HAL_CLK[i]);
     clk.pin_bit_mask = mask;
     gpio_config(&clk);
-    // Create HAL clock glitch filters
+    // Ensure HAL count pins use pull-ups as well
+    gpio_config_t cnt = {};
+    cnt.mode = GPIO_MODE_INPUT;
+    cnt.intr_type = GPIO_INTR_DISABLE;
+    cnt.pull_up_en = GPIO_PULLUP_ENABLE;
+    cnt.pull_down_en = GPIO_PULLDOWN_DISABLE;
+    mask = 0;
+    for (int i = 0; i < NUM_MOTORS; ++i) mask |= (1ULL << HAL_CNT[i]);
+    cnt.pin_bit_mask = mask;
+    gpio_config(&cnt);
+    // Optionally create HAL clock pin glitch filters (not enabled by default)
     for (int i = 0; i < NUM_MOTORS; ++i) {
-        gpio_pin_glitch_filter_config_t cfg = {};
-        cfg.gpio_num = (gpio_num_t)HAL_CLK[i];
-        gpio_new_pin_glitch_filter(&cfg, &hal_clk_filter[i]);
+        // Uncomment to enable HAL clock filters if needed
+        // gpio_pin_glitch_filter_config_t cfg = {};
+        // cfg.gpio_num = (gpio_num_t)HAL_CLK[i];
+        // gpio_new_pin_glitch_filter(&cfg, &hal_clk_filter[i]);
     }
     // HAL clock ISR handlers added via enable_hal_irqs()
 }
 
 extern "C" void app_main(void) {
     ESP_LOGI(TAG, "Init");
-    // Init motors and display
-    for (int i = 0; i < NUM_MOTORS; ++i) motors[i].init();
-    display.init();
-    display.set_refresh_rate(1.0f);
-    display.print("Wallter", "Ready");
-
-    configure_gpio();
-    // Add HAL clock IRQs (equivalent to Arduino attachInterrupt on HAL_CLK)
-    enable_hal_irqs();
+    setup();
 
     // Read initial button states for manual mode / self-test logic
     bool e_pressed = (gpio_get_level((gpio_num_t)BUTTON_EXTEND_PIN) == 0);
     bool r_pressed = (gpio_get_level((gpio_num_t)BUTTON_RETRACT_PIN) == 0);
 
-    if (e_pressed && !r_pressed) {
+    if (e_pressed && !r_pressed) { 
         display.set_refresh_rate(0.75f);
         display.update_manual_view((long)motors[MASTER_MOTOR].getPosition());
         display.set_view(LCD_MANUAL_VIEW);
@@ -370,7 +378,7 @@ extern "C" void app_main(void) {
             e_pressed = (gpio_get_level((gpio_num_t)BUTTON_EXTEND_PIN) == 0);
             r_pressed = (gpio_get_level((gpio_num_t)BUTTON_RETRACT_PIN) == 0);
             int speed = 0;
-            if (e_pressed) {
+                if (e_pressed) { 
                 speed = MINSPEED;
                 ESP_LOGI(TAG, "Extending.");
             }
@@ -385,7 +393,7 @@ extern "C" void app_main(void) {
             long pos = (long)motors[MASTER_MOTOR].getPosition();
             display.update_manual_view(pos);
             display.refresh();
-            vTaskDelay(pdMS_TO_TICKS(100));
+                vTaskDelay(pdMS_TO_TICKS(100)); 
         }
     }
 
@@ -444,57 +452,14 @@ extern "C" void app_main(void) {
         ESP_LOGI(TAG, "Skipping self-test.");
     }
 
-    // Configure follower PID motors
-    for (int p = 1; p < NUM_MOTORS; p++) {
-        motors[p].pidBegin(8, 0.001, 0);
-        motors[p].pidConfigureLimits(MINSPEED, MAXSPEED);
-        motors[p].pidSetSampleTime(50);
-        motors[p].pidStart();
-    }
-
-    set_current_command(CMD_HOME);
-    g_target_idx = 0;
-
-    // Ensure button ISRs configured
-    gpio_isr_handler_add((gpio_num_t)BUTTON_EXTEND_PIN, isr_button_extend, NULL);
-    gpio_isr_handler_add((gpio_num_t)BUTTON_RETRACT_PIN, isr_button_retract, NULL);
-
+    // Post-setup initial view
     display.update_target_view(LOWEST_ANGLE, 0);
     display.update_homing_view();
     display.set_view(LCD_HOMING_VIEW);
 
     while (1) {
-        // Handle buttons
-        // Equivalent of Arduino handle_buttons()
-        bool extend  = g_extend_pressed;
-        bool retract = g_retract_pressed;
-        g_extend_pressed  = false;
-        g_retract_pressed = false;
-        if (extend || retract) {
-            display.trigger_refresh();
-        }
-        if (current_cmd != CMD_HOME) {
-            int new_target_idx = compute_next_target_index(extend, retract, (int)g_target_idx, MAX_ANGLES);
-            if (new_target_idx != (int)g_target_idx && new_target_idx >= 0 && new_target_idx < MAX_ANGLES) {
-                uint32_t new_target_position = TARGET_TICKS[new_target_idx];
-                int32_t pos = motors[MASTER_MOTOR].getPosition();
-                if (current_cmd == CMD_STOP) {
-                    int decided = decide_command_for_target(pos, new_target_position, CMD_STOP, CMD_EXTEND, CMD_RETRACT, CMD_HOME);
-                    set_current_command(decided);
-                    g_target_idx = (uint32_t)new_target_idx;
-                } else {
-                    if (!is_target_change_permitted(pos, new_target_position, current_cmd, CMD_EXTEND, CMD_RETRACT)) {
-                        display.show_short_message((char*)"ERROR:", (char*)"LOWERING", 2000);
-                    } else {
-                        ESP_LOGI(TAG, "Change accepted.");
-                        g_target_idx = (uint32_t)new_target_idx;
-                        if (new_target_idx == 0) {
-                            set_current_command(CMD_HOME);
-                        }
-                    }
-                }
-            }
-        }
+        // Handle buttons in a dedicated function (Arduino-style)
+        handle_buttons();
 
         // Master/followers speed control
         for (int m = 0; m < NUM_MOTORS; ++m) {
@@ -540,4 +505,106 @@ extern "C" void app_main(void) {
         display.refresh();
         vTaskDelay(pdMS_TO_TICKS(200));
     }
+}
+
+// Extracted setup routine (Arduino-style)
+static void setup() {
+    // Init motors and display
+    for (int i = 0; i < NUM_MOTORS; ++i) motors[i].init();
+    display.init();
+    display.set_refresh_rate(1.0f);
+    display.print("Wallter", "LETS go3");
+
+    configure_gpio();
+    // Add HAL clock IRQs (equivalent to Arduino attachInterrupt on HAL_CLK)
+    enable_hal_irqs();
+
+    // Reset counters and positions like Arduino setup()
+    reset_tick_counters(0, true);
+    reset_motor_positions();
+
+    // Enable button glitch filters for simple debounce
+    if (btn_extend_filter) {
+        gpio_glitch_filter_enable(btn_extend_filter);
+    }
+    if (btn_retract_filter) {
+        gpio_glitch_filter_enable(btn_retract_filter);
+    }
+
+    // Latch initial button states (active-low) for manual mode/self-test logic
+    if (gpio_get_level((gpio_num_t)BUTTON_EXTEND_PIN) == 0) {
+        g_extend_pressed = true;
+    }
+    if (gpio_get_level((gpio_num_t)BUTTON_RETRACT_PIN) == 0) {
+        g_retract_pressed = true;
+    }
+
+    // Configure follower PID motors
+    for (int p = 1; p < NUM_MOTORS; p++) {
+        motors[p].pidBegin(8, 0.001, 0);
+        motors[p].pidConfigureLimits(MINSPEED, MAXSPEED);
+        motors[p].pidSetSampleTime(50);
+        motors[p].pidStart();
+    }
+
+    set_current_command(CMD_HOME);
+    g_target_idx = 0;
+
+    // Ensure button ISRs configured
+    gpio_isr_handler_add((gpio_num_t)BUTTON_EXTEND_PIN, isr_button_extend, NULL);
+    gpio_isr_handler_add((gpio_num_t)BUTTON_RETRACT_PIN, isr_button_retract, NULL);
+
+    // Initial display view matching Arduino setup
+    display.update_target_view(LOWEST_ANGLE, 0);
+    display.update_homing_view();
+    display.set_view(LCD_HOMING_VIEW);
+}
+
+// Replicate Arduino handle_buttons() logic without blocking loops
+static void handle_buttons() {
+    bool extend  = g_extend_pressed;
+    bool retract = g_retract_pressed;
+    // Clear latched flags
+    g_extend_pressed  = false;
+    g_retract_pressed = false;
+
+    // Exit early during homing
+    if (current_cmd == CMD_HOME) {
+        return;
+    }
+
+    if (extend || retract) {
+        ESP_LOGI(TAG, "Button pressed: extend=%d retract=%d", (int)extend, (int)retract);
+    }
+
+
+    int new_idx = compute_next_target_index(extend, retract, (int)g_target_idx, MAX_ANGLES);
+    if (new_idx == (int)g_target_idx) {
+        return; // no change
+    }
+    if (new_idx < 0 || new_idx >= MAX_ANGLES) {
+        ESP_LOGW(TAG, "Out of range; ignoring.");
+        return;
+    }
+
+    uint32_t new_target_pos = TARGET_TICKS[new_idx];
+    int32_t pos = motors[MASTER_MOTOR].getPosition();
+
+    if (current_cmd == CMD_STOP) {
+        int decided = decide_command_for_target(pos, new_target_pos, CMD_STOP, CMD_EXTEND, CMD_RETRACT, CMD_HOME);
+        set_current_command(decided);
+        g_target_idx = (uint32_t)new_idx;
+        return;
+    }
+
+    if (!is_target_change_permitted(pos, new_target_pos, current_cmd, CMD_EXTEND, CMD_RETRACT)) {
+        display.show_short_message(const_cast<char*>("ERROR:"), const_cast<char*>("LOWERING"), 2000);
+        return;
+    }
+    ESP_LOGI(TAG, "Change accepted.");
+    g_target_idx = (uint32_t)new_idx;
+    if (new_idx == 0) {
+        set_current_command(CMD_HOME);
+    }
+    display.trigger_refresh();
 }

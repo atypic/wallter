@@ -9,8 +9,8 @@ static const char *TAG = "lcd_demo";
 
 extern "C" void espidf_lcd_demo(void) {
   // Configure I2C pins (update these to your board)
-  const gpio_num_t SDA = GPIO_NUM_13;
-  const gpio_num_t SCL = GPIO_NUM_14;
+  const gpio_num_t SDA = GPIO_NUM_7;
+  const gpio_num_t SCL = GPIO_NUM_6;
 
   rgb_lcd_idf lcd;
   if (lcd.init_i2c(I2C_NUM_0, SDA, SCL, 100000) != ESP_OK) {

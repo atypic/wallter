@@ -49,8 +49,8 @@ esp_err_t rgb_lcd_idf::begin(uint8_t cols, uint8_t lines, uint8_t dotsize) {
   _displaymode = LCD_ENTRYLEFT | LCD_ENTRYSHIFTDECREMENT;
   ESP_RETURN_ON_ERROR(command(LCD_ENTRYMODESET | _displaymode), TAG, "entrymode");
 
-  // Probe RGB chip
-  ESP_RETURN_ON_ERROR(probe_rgb_chip(), TAG, "probe_rgb");
+  // Always use classic RGB address (0x62); skip probing
+  rgb_addr_ = RGB_ADDRESS;
 
   // Init backlight depending on chip variant
   if (rgb_addr_ == RGB_ADDRESS_V5) {
@@ -217,26 +217,7 @@ esp_err_t rgb_lcd_idf::noBlinkLED() {
 // Low-level helpers
 esp_err_t rgb_lcd_idf::i2c_send_bytes(uint8_t addr, const uint8_t *data, size_t len) {
   if (!initialized_) return ESP_ERR_INVALID_STATE;
-  return i2c_master_write_to_device(port_, addr, data, len, pdMS_TO_TICKS(20));
+  return i2c_master_write_to_device(port_, addr, data, len, pdMS_TO_TICKS(50));
 }
 
-esp_err_t rgb_lcd_idf::probe_rgb_chip() {
-  uint8_t dummy = 0;
-  // Try V5 address first
-  esp_err_t err = i2c_master_write_to_device(port_, RGB_ADDRESS_V5, &dummy, 0, pdMS_TO_TICKS(20));
-  if (err == ESP_OK) {
-    rgb_addr_ = RGB_ADDRESS_V5;
-    ESP_LOGI(TAG, "RGB chip: V5 (0x6A)");
-    return ESP_OK;
-  }
-  // Fall back to classic
-  err = i2c_master_write_to_device(port_, RGB_ADDRESS, &dummy, 0, pdMS_TO_TICKS(20));
-  if (err == ESP_OK) {
-    rgb_addr_ = RGB_ADDRESS;
-    ESP_LOGI(TAG, "RGB chip: classic (0x62)");
-    return ESP_OK;
-  }
-  ESP_LOGW(TAG, "RGB chip not responding; defaulting to 0x62");
-  rgb_addr_ = RGB_ADDRESS;
-  return ESP_OK;
-}
+esp_err_t rgb_lcd_idf::probe_rgb_chip() { rgb_addr_ = RGB_ADDRESS; return ESP_OK; }

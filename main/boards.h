@@ -101,7 +101,7 @@ CytronMD motors[NUM_MOTORS] = {CytronMD(PWM_DIR, 2, 22),  // MASTER
 // -----------------------------------------------------------------------------
 #if defined(BOARD_TYPE) && (BOARD_TYPE == BOARD_TYPE_ARCTIC_CYTRON)
 
-bool g_has_keypad = false;
+static const bool g_has_keypad = false;
 
 #define LOWEST_ANGLE 20
 #define HIGHEST_ANGLE 70
@@ -124,18 +124,22 @@ bool g_has_keypad = false;
 
 #define LOCK_TIME_MS 10 * 60
 
-// HAL encoder pins (use input-capable GPIOs)
-// CLK: GPIO32, GPIO33; CNT: GPIO34, GPIO35
-unsigned int HAL_CLK[NUM_MOTORS] = {32, 33};
-unsigned int HAL_CNT[NUM_MOTORS] = {34, 35};
+// LCD I2C configuration (single source of truth)
+#define LCD_SDA_PIN 7
+#define LCD_SCL_PIN 6
+#define LCD_I2C_CLOCK_HZ 50000
+
+// HAL encoder pins
+static const unsigned int HAL_CLK[NUM_MOTORS] = {12, 10};
+static const unsigned int HAL_CNT[NUM_MOTORS] = {11, 9};
 
 // Button pins
-#define BUTTON_EXTEND_PIN 18
-#define BUTTON_RETRACT_PIN 19
+#define BUTTON_EXTEND_PIN 21
+#define BUTTON_RETRACT_PIN 47
 
 // Motor driver pins (PWM/DIR)
-unsigned int HAL_PWM[NUM_MOTORS] = {25, 26};
-unsigned int HAL_DIR[NUM_MOTORS] = {27, 14};
+static const unsigned int HAL_PWM[NUM_MOTORS] = {8, 3};
+static const unsigned int HAL_DIR[NUM_MOTORS] = {17, 18};
 
 #endif
 
