@@ -141,18 +141,23 @@ static uint8_t compute_progress_percent(int32_t current_pos, int32_t start_pos, 
 }
 
 static void set_current_command(int cmd) {
+
+    // Short circuit if same command requested.
     if (current_cmd == cmd) {
         return;
     }
-    if ((current_cmd == CMD_RETRACT) && (cmd == CMD_HOME)) {
-        current_cmd = cmd;
-        return;
-    }
+
+    // Else, we transition into a new state.
+    // This will have consequences, as the main loop will
+    // act on the new state.
+
     current_cmd = cmd;
     g_last_command_change_ms = (uint64_t)(esp_timer_get_time() / 1000ULL);
     // Nudge the UI to reflect state changes immediately
     display.refresh();
 
+    // If we have one of the movement commands, 
+    // we accept the command.
     if (cmd == CMD_EXTEND || cmd == CMD_RETRACT || cmd == CMD_HOME) {
         display.set_refresh_rate(1.0f);
         reset_idle_timer();
@@ -161,7 +166,12 @@ static void set_current_command(int cmd) {
         }
         target_ticks_extending = 0;
         target_ticks_retracting = 0;
-        for (int j = 0; j < NUM_MOTORS; ++j) motors[j].resetSteps(true);
+        for (int j = 0; j < NUM_MOTORS; ++j) 
+        {
+            motors[j].resetSteps(true);
+        }
+
+
         g_progress_start_ticks = motors[MASTER_MOTOR].getPosition();
     } else if (cmd == CMD_STOP) {
         display.set_refresh_rate(30.0f);
@@ -558,11 +568,17 @@ extern "C" void app_main(void) {
         ESP_LOGI(TAG, "Skipping self-test.");
     }
 
+    // Self testing done or skipped, let's go home.
     // Post-setup initial view
     display.update_target_view(LOWEST_ANGLE, 0);
     display.update_homing_view();
     display.set_view(LCD_HOMING_VIEW);
 
+    // Make sure we reset idle timer since we've been using the motors.
+    reset_idle_timer();
+    set_current_command(CMD_HOME);
+
+    // this is the main loop
     while (1) {
         // Handle buttons in a dedicated function (Arduino-style)
         handle_buttons();
@@ -619,6 +635,7 @@ static void setup() {
     for (int i = 0; i < NUM_MOTORS; ++i) motors[i].init();
     vTaskDelay(pdMS_TO_TICKS(500));
     display.init();
+    vTaskDelay(pdMS_TO_TICKS(500));
     display.set_refresh_rate(1.0f);
     // Run startup animation like old display
     display.startup_animation();

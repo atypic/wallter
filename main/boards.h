@@ -24,7 +24,7 @@
 #if defined(BOARD_TYPE) && (BOARD_TYPE == BOARD_TYPE_LEANGEN_4_MOTOR)
 bool g_has_keypad = false;
 
-#define LOWEST_ANGLE 20
+#define LOWEST_ANGLE 10
 #define HIGHEST_ANGLE 60
 #define ANGLE_STEP 5
 
@@ -63,7 +63,7 @@ CytronMD motors[NUM_MOTORS] = {CytronMD(PWM_DIR, 3, 36),  // MASTER
 #if defined(BOARD_TYPE) && (BOARD_TYPE == BOARD_TYPE_ARCTIC_WITH_KEYPAD)
 
 #define LOWEST_ANGLE 10
-#define HIGHEST_ANGLE 70
+#define HIGHEST_ANGLE 60
 #define ANGLE_STEP 5
 
 #define MASTER_MOTOR 0
@@ -103,8 +103,8 @@ CytronMD motors[NUM_MOTORS] = {CytronMD(PWM_DIR, 2, 22),  // MASTER
 
 static const bool g_has_keypad = false;
 
-#define LOWEST_ANGLE 20
-#define HIGHEST_ANGLE 70
+#define LOWEST_ANGLE 10
+#define HIGHEST_ANGLE 60
 #define ANGLE_STEP 5
 
 #define MASTER_MOTOR 0
