@@ -1,5 +1,7 @@
 #include "esp_log.h"
 #include "esp_timer.h"
+#include "nvs.h"
+#include "nvs_flash.h"
 #include "driver/gpio.h"
 #include "driver/gpio_filter.h"
 #include <stdarg.h>
@@ -90,11 +92,145 @@ static void disable_hal_irqs() {
 
 // Idle helpers and master speed computation
 // Target positions (ticks) for angles (match Arduino flow)
-static const uint32_t TARGET_TICKS[] = {0, 3000, 6000, 9000, 12500, 16400, 20000, 24000, 29000, 33000, 37000};
-static const int MAX_ANGLES = sizeof(TARGET_TICKS) / sizeof(TARGET_TICKS[0]);
+static const uint32_t DEFAULT_TARGET_TICKS[] = {0, 3000, 6000, 9000, 12500, 16400, 20000, 24000, 29000, 33000, 37000};
+static const int MAX_ANGLES = sizeof(DEFAULT_TARGET_TICKS) / sizeof(DEFAULT_TARGET_TICKS[0]);
+static uint32_t g_target_ticks[MAX_ANGLES] = {0};
 static uint32_t g_target_idx = 0;
 static uint32_t target_ticks_retracting  = 0;
 static uint32_t target_ticks_extending   = 0;
+
+// Calibration storage (NVS)
+static constexpr const char *CAL_NVS_NAMESPACE = "wallter";
+static constexpr const char *CAL_NVS_KEY_BLOB  = "cal_ticks_v1";
+static constexpr uint32_t CAL_BLOB_MAGIC = 0x57414C54; // 'WALT'
+
+static constexpr int CAL_FIRST_ANGLE = 20;
+static constexpr int CAL_LAST_ANGLE  = 60;
+static constexpr int CAL_STEP_ANGLE  = 5;
+static constexpr int CAL_COUNT = ((CAL_LAST_ANGLE - CAL_FIRST_ANGLE) / CAL_STEP_ANGLE) + 1; // 9
+static constexpr uint32_t CAL_ADJUST_STEP_TICKS = 50;
+
+struct CalBlobV1 {
+    uint32_t magic;
+    uint32_t version;
+    uint32_t ticks[CAL_COUNT]; // angles 20..60 step 5
+};
+
+static inline uint64_t now_ms() {
+    return (uint64_t)(esp_timer_get_time() / 1000ULL);
+}
+
+static inline bool read_extend_pressed() {
+    return (gpio_get_level((gpio_num_t)BUTTON_EXTEND_PIN) == 0);
+}
+static inline bool read_retract_pressed() {
+    return (gpio_get_level((gpio_num_t)BUTTON_RETRACT_PIN) == 0);
+}
+
+static int angle_to_index(int angle_deg) {
+    if (angle_deg < LOWEST_ANGLE || angle_deg > HIGHEST_ANGLE) {
+        return -1;
+    }
+    int delta = angle_deg - LOWEST_ANGLE;
+    if ((delta % ANGLE_STEP) != 0) {
+        return -1;
+    }
+    int idx = delta / ANGLE_STEP;
+    if (idx < 0 || idx >= MAX_ANGLES) {
+        return -1;
+    }
+    return idx;
+}
+
+static void init_target_ticks_defaults() {
+    for (int i = 0; i < MAX_ANGLES; ++i) {
+        g_target_ticks[i] = DEFAULT_TARGET_TICKS[i];
+    }
+}
+
+static esp_err_t init_nvs_once() {
+    esp_err_t err = nvs_flash_init();
+    if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+        ESP_LOGW(TAG, "NVS init: erasing flash (%d)", (int)err);
+        ESP_ERROR_CHECK(nvs_flash_erase());
+        err = nvs_flash_init();
+    }
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "NVS init failed: %d", (int)err);
+    }
+    return err;
+}
+
+static void apply_calibration_to_target_ticks(const CalBlobV1 &blob) {
+    // Apply stored ticks for angles 20..60 step 5
+    for (int i = 0; i < CAL_COUNT; ++i) {
+        int angle = CAL_FIRST_ANGLE + i * CAL_STEP_ANGLE;
+        int idx = angle_to_index(angle);
+        if (idx >= 0) {
+            g_target_ticks[idx] = blob.ticks[i];
+        }
+    }
+    // The control table includes 15 degrees; derive it by interpolation between 10deg (0) and 20deg.
+    int idx20 = angle_to_index(20);
+    int idx15 = angle_to_index(15);
+    if (idx20 >= 0 && idx15 >= 0) {
+        g_target_ticks[idx15] = g_target_ticks[idx20] / 2U;
+    }
+    // Always ensure home (lowest angle) is 0 ticks.
+    g_target_ticks[0] = 0;
+}
+
+static bool load_calibration_from_nvs() {
+    init_target_ticks_defaults();
+
+    nvs_handle_t handle;
+    esp_err_t err = nvs_open(CAL_NVS_NAMESPACE, NVS_READONLY, &handle);
+    if (err != ESP_OK) {
+        ESP_LOGI(TAG, "No calibration namespace yet (%d); using defaults", (int)err);
+        return false;
+    }
+
+    CalBlobV1 blob = {};
+    size_t len = sizeof(blob);
+    err = nvs_get_blob(handle, CAL_NVS_KEY_BLOB, &blob, &len);
+    nvs_close(handle);
+    if (err != ESP_OK || len != sizeof(blob)) {
+        ESP_LOGI(TAG, "No calibration blob (%d, len=%u); using defaults", (int)err, (unsigned)len);
+        return false;
+    }
+    if (blob.magic != CAL_BLOB_MAGIC || blob.version != 1U) {
+        ESP_LOGW(TAG, "Calibration blob invalid (magic=0x%08lx ver=%lu)", (unsigned long)blob.magic, (unsigned long)blob.version);
+        return false;
+    }
+    apply_calibration_to_target_ticks(blob);
+    ESP_LOGI(TAG, "Calibration loaded from NVS");
+    return true;
+}
+
+static esp_err_t save_calibration_to_nvs(const uint32_t ticks_20_60[CAL_COUNT]) {
+    CalBlobV1 blob = {};
+    blob.magic = CAL_BLOB_MAGIC;
+    blob.version = 1U;
+    for (int i = 0; i < CAL_COUNT; ++i) {
+        blob.ticks[i] = ticks_20_60[i];
+    }
+
+    nvs_handle_t handle;
+    esp_err_t err = nvs_open(CAL_NVS_NAMESPACE, NVS_READWRITE, &handle);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "NVS open failed: %d", (int)err);
+        return err;
+    }
+    err = nvs_set_blob(handle, CAL_NVS_KEY_BLOB, &blob, sizeof(blob));
+    if (err == ESP_OK) {
+        err = nvs_commit(handle);
+    }
+    nvs_close(handle);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "NVS save failed: %d", (int)err);
+    }
+    return err;
+}
 
 // Command identifiers
 enum { CMD_STOP = 0, CMD_EXTEND = 1, CMD_RETRACT = 2, CMD_HOME = 3 };
@@ -201,7 +337,7 @@ static void reset_motor_positions() {
 }
 
 static int32_t get_master_motor_speed() {
-    int32_t target = (int32_t)TARGET_TICKS[g_target_idx];
+    int32_t target = (int32_t)g_target_ticks[g_target_idx];
     if (current_cmd == CMD_HOME) {
         target = -1000000; // match Arduino behavior
     }
@@ -374,7 +510,7 @@ static void print_state(uint32_t print_rate_ms) {
     if (!throttle(last_print_ms, print_rate_ms)) {
         return;
     }
-    uint32_t tgt = TARGET_TICKS[g_target_idx];
+    uint32_t tgt = g_target_ticks[g_target_idx];
     int32_t pos0 = motors[0].getPosition();
     int32_t pos1 = motors[1].getPosition();
     uint32_t so0 = motors[0].getStepsOut();
@@ -446,126 +582,245 @@ static void configure_gpio() {
     // HAL clock ISR handlers added via enable_hal_irqs()
 }
 
-extern "C" void app_main(void) {
-    ESP_LOGI(TAG, "Init");
-    setup();
+static void motor_control_iteration() {
+    // Master/followers speed control
+    for (int m = 0; m < NUM_MOTORS; ++m) {
+        if (m == MASTER_MOTOR) {
+            int new_speed = get_master_motor_speed();
+            motors[MASTER_MOTOR].setSpeed(new_speed);
+            continue;
+        }
+        switch (current_cmd) {
+            case CMD_STOP:
+                motors[m].setSpeed(0);
+                motors[m].pidReset();
+                break;
+            case CMD_EXTEND: {
+                int32_t spd = motors[m].computeFollow(false, g_accel_phase, abs(motors[MASTER_MOTOR].getSpeed()), motors[MASTER_MOTOR]);
+                motors[m].setSpeed(spd);
+                break;
+            }
+            case CMD_RETRACT: {
+                int32_t spd = motors[m].computeFollow(true, g_accel_phase, abs(motors[MASTER_MOTOR].getSpeed()), motors[MASTER_MOTOR]);
+                motors[m].setSpeed(spd);
+                break;
+            }
+            case CMD_HOME: {
+                int32_t spd = motors[m].computeFollow(true, g_accel_phase, abs(motors[MASTER_MOTOR].getSpeed()), motors[MASTER_MOTOR]);
+                motors[m].setSpeed(spd);
+                break;
+            }
+            default:
+                ESP_LOGE(TAG, "Invalid command.");
+                panicf("BAD CMD");
+        }
+    }
+}
 
-    // Read initial button states for manual mode / self-test logic
-    bool e_pressed = (gpio_get_level((gpio_num_t)BUTTON_EXTEND_PIN) == 0);
-    bool r_pressed = (gpio_get_level((gpio_num_t)BUTTON_RETRACT_PIN) == 0);
+static void run_homing_blocking(uint32_t timeout_ms) {
+    display.update_homing_view();
+    display.set_view(LCD_HOMING_VIEW);
+    display.trigger_refresh();
+    reset_idle_timer();
+    set_current_command(CMD_HOME);
 
-    if (e_pressed && !r_pressed) { 
-        display.set_refresh_rate(0.75f);
-        display.update_manual_view((long)motors[MASTER_MOTOR].getPosition());
-        display.set_view(LCD_MANUAL_VIEW);
-        // Detach button ISRs to poll manually
-        gpio_isr_handler_remove((gpio_num_t)BUTTON_EXTEND_PIN);
-        gpio_isr_handler_remove((gpio_num_t)BUTTON_RETRACT_PIN);
+    uint64_t start = now_ms();
+    while (current_cmd != CMD_STOP) {
+        motor_control_iteration();
+        display.refresh();
+        vTaskDelay(pdMS_TO_TICKS(50));
+        if ((now_ms() - start) > timeout_ms) {
+            panicf("HOME TIMEOUT");
+        }
+    }
+}
+
+enum BootMenuChoice { MENU_CALIBRATE = 0, MENU_SELF_TEST = 1 };
+
+static BootMenuChoice run_boot_menu() {
+    int sel = 0;
+    bool prev_up = false;
+    bool prev_dn = false;
+    bool prev_both = false;
+    display.set_refresh_rate(0.2f);
+
+    auto render = [&]() {
+        if (sel == 0) {
+            display.print(">Calibrate", " Run self test");
+        } else {
+            display.print(" Calibrate", ">Run self test");
+        }
+    };
+    render();
+
+    // Wait for initial release to avoid auto-activating due to boot hold
+    while (read_extend_pressed() || read_retract_pressed()) {
+        vTaskDelay(pdMS_TO_TICKS(30));
+    }
+    prev_up = false;
+    prev_dn = false;
+    prev_both = false;
+
+    while (1) {
+        bool up = read_extend_pressed();
+        bool dn = read_retract_pressed();
+        bool both = up && dn;
+
+        if (!both) {
+            if (up && !prev_up) {
+                sel = (sel + 1) % 2;
+                render();
+            }
+            if (dn && !prev_dn) {
+                sel = (sel + 1) % 2;
+                render();
+            }
+        }
+        if (both && !prev_both) {
+            // Confirm selection
+            while (read_extend_pressed() || read_retract_pressed()) {
+                vTaskDelay(pdMS_TO_TICKS(30));
+            }
+            return (sel == 0) ? MENU_CALIBRATE : MENU_SELF_TEST;
+        }
+
+        prev_up = up;
+        prev_dn = dn;
+        prev_both = both;
+        vTaskDelay(pdMS_TO_TICKS(40));
+    }
+}
+
+static void run_calibration_mode() {
+    // Start by homing fully ("board all the way back")
+    run_homing_blocking(/*timeout_ms=*/45000);
+
+    // Calibration loop for 20..60 degrees in 5 degree steps
+    bool prev_up = false;
+    bool prev_dn = false;
+    bool prev_both = false;
+
+    for (int angle = CAL_FIRST_ANGLE; angle <= CAL_LAST_ANGLE; angle += CAL_STEP_ANGLE) {
+        int idx = angle_to_index(angle);
+        if (idx < 0) {
+            panicf("BAD ANG %d", angle);
+        }
+        g_target_idx = (uint32_t)idx;
+        // Ensure we are stopped before starting adjustments for this angle
+        set_current_command(CMD_STOP);
+
         while (1) {
-            e_pressed = (gpio_get_level((gpio_num_t)BUTTON_EXTEND_PIN) == 0);
-            r_pressed = (gpio_get_level((gpio_num_t)BUTTON_RETRACT_PIN) == 0);
-            int speed = 0;
-                if (e_pressed) { 
-                speed = MINSPEED;
-                ESP_LOGI(TAG, "Extending.");
+            // Drive motors toward current target ticks for this angle
+            int32_t pos = motors[MASTER_MOTOR].getPosition();
+            uint32_t tgt = g_target_ticks[g_target_idx];
+            if (pos < (int32_t)tgt) {
+                set_current_command(CMD_EXTEND);
+            } else if (pos > (int32_t)tgt) {
+                set_current_command(CMD_RETRACT);
+            } else {
+                set_current_command(CMD_STOP);
             }
-            if (r_pressed) {
-                speed = -1 * MINSPEED;
-                ESP_LOGI(TAG, "Retracting.");
+
+            motor_control_iteration();
+
+            // UI: "20: <hal cnt>"
+            char line1[17];
+            snprintf(line1, sizeof(line1), "%d: %lu", angle, (unsigned long)g_target_ticks[g_target_idx]);
+            display.print(line1, "");
+
+            bool up = read_extend_pressed();
+            bool dn = read_retract_pressed();
+            bool both = up && dn;
+
+            if (!both) {
+                if (up && !prev_up) {
+                    g_target_ticks[g_target_idx] += CAL_ADJUST_STEP_TICKS;
+                }
+                if (dn && !prev_dn) {
+                    if (g_target_ticks[g_target_idx] >= CAL_ADJUST_STEP_TICKS) {
+                        g_target_ticks[g_target_idx] -= CAL_ADJUST_STEP_TICKS;
+                    } else {
+                        g_target_ticks[g_target_idx] = 0;
+                    }
+                }
             }
-            for (int i = 0; i < NUM_MOTORS; ++i) {
-                motors[i].setSpeed(speed);
-                vTaskDelay(pdMS_TO_TICKS(100));
+
+            if (both && !prev_both) {
+                // Store current calibration (angles 20..60)
+                uint32_t ticks[CAL_COUNT];
+                for (int i = 0; i < CAL_COUNT; ++i) {
+                    int a = CAL_FIRST_ANGLE + i * CAL_STEP_ANGLE;
+                    int ii = angle_to_index(a);
+                    ticks[i] = (ii >= 0) ? g_target_ticks[ii] : 0;
+                }
+                save_calibration_to_nvs(ticks);
+                display.print("stored", "");
+                uint64_t end = now_ms() + 600ULL;
+                while (now_ms() < end) {
+                    vTaskDelay(pdMS_TO_TICKS(30));
+                }
+                // Wait for button release so we don't double-trigger
+                while (read_extend_pressed() || read_retract_pressed()) {
+                    vTaskDelay(pdMS_TO_TICKS(30));
+                }
+                break; // next angle
             }
-            long pos = (long)motors[MASTER_MOTOR].getPosition();
-            display.update_manual_view(pos);
-            display.refresh();
-                vTaskDelay(pdMS_TO_TICKS(100)); 
+
+            prev_up = up;
+            prev_dn = dn;
+            prev_both = both;
+            vTaskDelay(pdMS_TO_TICKS(60));
         }
     }
 
-    if (!(e_pressed && r_pressed)) {
-        // Full self-test sequence
-        const int test_speed = MINSPEED;
-        const int test_time  = 1000;
-        ESP_LOGI(TAG, "Self-test started.");
-        ESP_LOGI(TAG, "ST: init pos=[%ld %ld] si=[%lu %lu] so=[%lu %lu]",
-             (long)motors[0].getPosition(), (long)motors[1].getPosition(),
-             (unsigned long)motors[0].getStepsIn(), (unsigned long)motors[1].getStepsIn(),
-             (unsigned long)motors[0].getStepsOut(), (unsigned long)motors[1].getStepsOut());
-        display.print("Self test 1", "Extending.");
+    // Derive 15 degrees entry again, and return to home.
+    {
+        int idx20 = angle_to_index(20);
+        int idx15 = angle_to_index(15);
+        if (idx20 >= 0 && idx15 >= 0) {
+            g_target_ticks[idx15] = g_target_ticks[idx20] / 2U;
+        }
+        g_target_ticks[0] = 0;
+    }
 
-        // Start IRQs for HAL clocks (already configured by configure_gpio)
-        // Retract then extend
-        ESP_LOGI(TAG, "ST: retract phase start, speed=%d", test_speed);
-        for (int i = 0; i < NUM_MOTORS; i++) motors[i].setSpeed(-test_speed);
-        ESP_LOGI(TAG, "ST: retract phase running...");
-        vTaskDelay(pdMS_TO_TICKS(test_time + 500));
-        ESP_LOGI(TAG, "ST: retract done. si=[%lu %lu] so=[%lu %lu]",
-             (unsigned long)motors[0].getStepsIn(), (unsigned long)motors[1].getStepsIn(),
-             (unsigned long)motors[0].getStepsOut(), (unsigned long)motors[1].getStepsOut());
-        reset_tick_counters(0, true);
-        ESP_LOGI(TAG, "ST: counters reset. si=[%lu %lu] so=[%lu %lu]",
-             (unsigned long)motors[0].getStepsIn(), (unsigned long)motors[1].getStepsIn(),
-             (unsigned long)motors[0].getStepsOut(), (unsigned long)motors[1].getStepsOut());
-        for (int i = 0; i < NUM_MOTORS; i++) motors[i].setSpeed(test_speed);
-        ESP_LOGI(TAG, "ST: extend phase start, speed=%d", test_speed);
-        vTaskDelay(pdMS_TO_TICKS(test_time));
-        ESP_LOGI(TAG, "ST: extend done. si=[%lu %lu] so=[%lu %lu]",
-             (unsigned long)motors[0].getStepsIn(), (unsigned long)motors[1].getStepsIn(),
-             (unsigned long)motors[0].getStepsOut(), (unsigned long)motors[1].getStepsOut());
-        display.print("Phase 1 done", "Checking...");
-        for (int i = 0; i < NUM_MOTORS; i++) motors[i].setSpeed(0);
-        ESP_LOGI(TAG, "ST: motors stopped after phase 1.");
-        for (int i = 0; i < NUM_MOTORS; i++) {
-            if (motors[i].getStepsOut() < 100U) {
-                ESP_LOGE(TAG, "Self-test failed: motor %d si:%d so:%d", i, (int)motors[i].getStepsIn(), (int)motors[i].getStepsOut());
-                char tbuf[32];
-                snprintf(tbuf, sizeof(tbuf), "M:%d SO:%d", i, (int)motors[i].getStepsOut());
-                display.print("SELF TEST FAILED", tbuf);
-                panicf("M%d NO OUT", i);
-            }
+    display.print("Cal complete", "Homing...");
+    run_homing_blocking(/*timeout_ms=*/45000);
+}
+
+static void run_self_test_sequence();
+
+extern "C" void app_main(void) {
+    ESP_LOGI(TAG, "Init");
+
+    // NVS for calibration persistence
+    init_nvs_once();
+    load_calibration_from_nvs();
+
+    setup();
+
+    // Boot menu: hold EXTEND while starting
+    bool boot_extend = read_extend_pressed();
+    bool boot_retract = read_retract_pressed();
+    if (boot_extend) {
+        // Clear any latched interrupt flags before entering menu.
+        g_extend_pressed = false;
+        g_retract_pressed = false;
+
+        BootMenuChoice choice = run_boot_menu();
+        if (choice == MENU_CALIBRATE) {
+            display.print("Calibration", "Starting...");
+            run_calibration_mode();
+        } else {
+            run_self_test_sequence();
         }
 
-        display.print("Self test 2", "Retracting.");
-        ESP_LOGI(TAG, "ST: phase 2 retract start.");
-        for (int i = 0; i < NUM_MOTORS; i++) motors[i].setSpeed(-test_speed);
-        vTaskDelay(pdMS_TO_TICKS(test_time));
-        ESP_LOGI(TAG, "ST: phase 2 retract done. si=[%lu %lu] so=[%lu %lu]",
-             (unsigned long)motors[0].getStepsIn(), (unsigned long)motors[1].getStepsIn(),
-             (unsigned long)motors[0].getStepsOut(), (unsigned long)motors[1].getStepsOut());
-        display.print("Phase 2 done", "Checking...");
-        for (int i = 0; i < NUM_MOTORS; i++) motors[i].setSpeed(0);
-        ESP_LOGI(TAG, "ST: motors stopped after phase 2.");
-        for (int i = 0; i < NUM_MOTORS; i++) {
-            if (motors[i].getStepsIn() < 100U) {
-                ESP_LOGE(TAG, "Self-test failed: motor %d si:%d so:%d", i, (int)motors[i].getStepsIn(), (int)motors[i].getStepsOut());
-                char tbuf[32];
-                snprintf(tbuf, sizeof(tbuf), "M:%d SI:%d", i, (int)motors[i].getStepsIn());
-                display.print("SELF TEST FAILED:", tbuf);
-                panicf("M%d NO IN", i);
-            }
-        }
-        bool final_success = true;
-        for (int i = 0; i < NUM_MOTORS; ++i) {
-            if (abs((int)motors[i].getStepsOut() - (int)motors[i].getStepsIn()) > 200) {
-                final_success = false;
-
-            }
-        }
-        if (!final_success) {
-            display.print("FAIL: BAD SENSOR DATA", "Check connections.");
-            panicf("CHECK CONNECTIONS");
-        }
-        // Avoid show_short_message due to hang; use safe timed print
-        display.print(const_cast<char*>("Self test"), const_cast<char*>("PASSED"));
-        uint64_t end_ms = (uint64_t)(esp_timer_get_time() / 1000ULL) + 1500ULL;
-        while ((uint64_t)(esp_timer_get_time() / 1000ULL) < end_ms) {
-            display.refresh();
-            vTaskDelay(pdMS_TO_TICKS(50));
-        }
+        // Re-load calibration after a calibration run (ensures interpolation is applied consistently)
+        load_calibration_from_nvs();
+        g_extend_pressed = false;
+        g_retract_pressed = false;
     } else {
-        ESP_LOGI(TAG, "Skipping self-test.");
+        (void)boot_retract;
+        ESP_LOGI(TAG, "Normal boot: skipping self-test (use boot menu)");
     }
 
     // Self testing done or skipped, let's go home.
@@ -583,42 +838,11 @@ extern "C" void app_main(void) {
         // Handle buttons in a dedicated function (Arduino-style)
         handle_buttons();
 
-        // Master/followers speed control
-        for (int m = 0; m < NUM_MOTORS; ++m) {
-            if (m == MASTER_MOTOR) {
-                int new_speed = get_master_motor_speed();
-                motors[MASTER_MOTOR].setSpeed(new_speed);
-                continue;
-            }
-            switch (current_cmd) {
-                case CMD_STOP:
-                    motors[m].setSpeed(0);
-                    motors[m].pidReset();
-                    break;
-                case CMD_EXTEND: {
-                    int32_t spd = motors[m].computeFollow(false, g_accel_phase, abs(motors[MASTER_MOTOR].getSpeed()), motors[MASTER_MOTOR]);
-                    motors[m].setSpeed(spd);
-                    break;
-                }
-                case CMD_RETRACT: {
-                    int32_t spd = motors[m].computeFollow(true, g_accel_phase, abs(motors[MASTER_MOTOR].getSpeed()), motors[MASTER_MOTOR]);
-                    motors[m].setSpeed(spd);
-                    break;
-                }
-                case CMD_HOME: {
-                    int32_t spd = motors[m].computeFollow(true, g_accel_phase, abs(motors[MASTER_MOTOR].getSpeed()), motors[MASTER_MOTOR]);
-                    motors[m].setSpeed(spd);
-                    break;
-                }
-                default:
-                    ESP_LOGE(TAG, "Invalid command.");
-                    panicf("BAD CMD");
-            }
-        }
+        motor_control_iteration();
 
         // Periodic logging and stall checks, update target view
         print_state(500);
-        uint32_t target_ticks = TARGET_TICKS[g_target_idx];
+        uint32_t target_ticks = g_target_ticks[g_target_idx];
         int32_t pos           = motors[MASTER_MOTOR].getPosition();
         uint8_t pct = compute_progress_percent(pos, g_progress_start_ticks, (int32_t)target_ticks);
         float tgt_angle = (g_target_idx == 0) ? LOWEST_ANGLE : (g_target_idx * ANGLE_STEP + LOWEST_ANGLE);
@@ -714,7 +938,7 @@ static void handle_buttons() {
         return;
     }
 
-    uint32_t new_target_pos = TARGET_TICKS[new_idx];
+    uint32_t new_target_pos = g_target_ticks[new_idx];
     int32_t pos = motors[MASTER_MOTOR].getPosition();
 
     if (current_cmd == CMD_STOP) {
@@ -736,4 +960,83 @@ static void handle_buttons() {
         set_current_command(CMD_RETRACT);
     }
     display.trigger_refresh();
+}
+
+// Extracted self-test to re-use in boot menu.
+static void run_self_test_sequence() {
+    const int test_speed = MINSPEED;
+    const int test_time  = 1000;
+    ESP_LOGI(TAG, "Self-test started.");
+    ESP_LOGI(TAG, "ST: init pos=[%ld %ld] si=[%lu %lu] so=[%lu %lu]",
+         (long)motors[0].getPosition(), (long)motors[1].getPosition(),
+         (unsigned long)motors[0].getStepsIn(), (unsigned long)motors[1].getStepsIn(),
+         (unsigned long)motors[0].getStepsOut(), (unsigned long)motors[1].getStepsOut());
+    display.print("Self test 1", "Extending.");
+
+    // Retract then extend
+    ESP_LOGI(TAG, "ST: retract phase start, speed=%d", test_speed);
+    for (int i = 0; i < NUM_MOTORS; i++) motors[i].setSpeed(-test_speed);
+    ESP_LOGI(TAG, "ST: retract phase running...");
+    vTaskDelay(pdMS_TO_TICKS(test_time + 500));
+    ESP_LOGI(TAG, "ST: retract done. si=[%lu %lu] so=[%lu %lu]",
+         (unsigned long)motors[0].getStepsIn(), (unsigned long)motors[1].getStepsIn(),
+         (unsigned long)motors[0].getStepsOut(), (unsigned long)motors[1].getStepsOut());
+    reset_tick_counters(0, true);
+    ESP_LOGI(TAG, "ST: counters reset. si=[%lu %lu] so=[%lu %lu]",
+         (unsigned long)motors[0].getStepsIn(), (unsigned long)motors[1].getStepsIn(),
+         (unsigned long)motors[0].getStepsOut(), (unsigned long)motors[1].getStepsOut());
+    for (int i = 0; i < NUM_MOTORS; i++) motors[i].setSpeed(test_speed);
+    ESP_LOGI(TAG, "ST: extend phase start, speed=%d", test_speed);
+    vTaskDelay(pdMS_TO_TICKS(test_time));
+    ESP_LOGI(TAG, "ST: extend done. si=[%lu %lu] so=[%lu %lu]",
+         (unsigned long)motors[0].getStepsIn(), (unsigned long)motors[1].getStepsIn(),
+         (unsigned long)motors[0].getStepsOut(), (unsigned long)motors[1].getStepsOut());
+    display.print("Phase 1 done", "Checking...");
+    for (int i = 0; i < NUM_MOTORS; i++) motors[i].setSpeed(0);
+    ESP_LOGI(TAG, "ST: motors stopped after phase 1.");
+    for (int i = 0; i < NUM_MOTORS; i++) {
+        if (motors[i].getStepsOut() < 100U) {
+            ESP_LOGE(TAG, "Self-test failed: motor %d si:%d so:%d", i, (int)motors[i].getStepsIn(), (int)motors[i].getStepsOut());
+            char tbuf[32];
+            snprintf(tbuf, sizeof(tbuf), "M:%d SO:%d", i, (int)motors[i].getStepsOut());
+            display.print("SELF TEST FAILED", tbuf);
+            panicf("M%d NO OUT", i);
+        }
+    }
+
+    display.print("Self test 2", "Retracting.");
+    ESP_LOGI(TAG, "ST: phase 2 retract start.");
+    for (int i = 0; i < NUM_MOTORS; i++) motors[i].setSpeed(-test_speed);
+    vTaskDelay(pdMS_TO_TICKS(test_time));
+    ESP_LOGI(TAG, "ST: phase 2 retract done. si=[%lu %lu] so=[%lu %lu]",
+         (unsigned long)motors[0].getStepsIn(), (unsigned long)motors[1].getStepsIn(),
+         (unsigned long)motors[0].getStepsOut(), (unsigned long)motors[1].getStepsOut());
+    display.print("Phase 2 done", "Checking...");
+    for (int i = 0; i < NUM_MOTORS; i++) motors[i].setSpeed(0);
+    ESP_LOGI(TAG, "ST: motors stopped after phase 2.");
+    for (int i = 0; i < NUM_MOTORS; i++) {
+        if (motors[i].getStepsIn() < 100U) {
+            ESP_LOGE(TAG, "Self-test failed: motor %d si:%d so:%d", i, (int)motors[i].getStepsIn(), (int)motors[i].getStepsOut());
+            char tbuf[32];
+            snprintf(tbuf, sizeof(tbuf), "M:%d SI:%d", i, (int)motors[i].getStepsIn());
+            display.print("SELF TEST FAILED:", tbuf);
+            panicf("M%d NO IN", i);
+        }
+    }
+    bool final_success = true;
+    for (int i = 0; i < NUM_MOTORS; ++i) {
+        if (abs((int)motors[i].getStepsOut() - (int)motors[i].getStepsIn()) > 200) {
+            final_success = false;
+        }
+    }
+    if (!final_success) {
+        display.print("FAIL: BAD SENSOR DATA", "Check connections.");
+        panicf("CHECK CONNECTIONS");
+    }
+    display.print("Self test", "PASSED");
+    uint64_t end_ms = now_ms() + 1500ULL;
+    while (now_ms() < end_ms) {
+        display.refresh();
+        vTaskDelay(pdMS_TO_TICKS(50));
+    }
 }
