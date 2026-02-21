@@ -11,11 +11,19 @@
 #include "app_config.hpp"
 #include "angle_utils.hpp"
 #include "calibration_store.hpp"
+#include "commands.hpp"
+#include "modes.hpp"
 #include "display.hpp"
 #include "motordriver.hpp"
 #include "buttons.hpp"
 
 static const char *TAG = "main";
+
+using wallter::CMD_EXTEND;
+using wallter::CMD_HOME;
+using wallter::CMD_RETRACT;
+using wallter::CMD_STOP;
+
 // Forward declaration for button handler
 static void handle_buttons();
 static void setup();
@@ -98,12 +106,6 @@ static uint32_t g_target_idx = 0;
 static uint32_t target_ticks_retracting  = 0;
 static uint32_t target_ticks_extending   = 0;
 
-static constexpr int CAL_FIRST_ANGLE = wallter::calibration::kFirstAngle;
-static constexpr int CAL_LAST_ANGLE  = wallter::calibration::kLastAngle;
-static constexpr int CAL_STEP_ANGLE  = wallter::calibration::kStepAngle;
-static constexpr int CAL_COUNT       = wallter::calibration::kCount;
-static constexpr uint32_t CAL_ADJUST_STEP_TICKS = 50;
-
 static inline uint64_t now_ms() {
     return (uint64_t)(esp_timer_get_time() / 1000ULL);
 }
@@ -118,8 +120,7 @@ static inline bool read_retract_pressed() {
 
 
 // Command identifiers
-enum { CMD_STOP = 0, CMD_EXTEND = 1, CMD_RETRACT = 2, CMD_HOME = 3 };
-static int current_cmd = CMD_STOP;
+static int current_cmd = wallter::CMD_STOP;
 static int32_t g_progress_start_ticks = 0;
 static uint64_t g_last_error_check_ms = 0;
 static uint64_t last_print_ms = 0;
@@ -507,7 +508,7 @@ static void run_homing_blocking(uint32_t timeout_ms) {
     display.set_view(LCD_HOMING_VIEW);
     display.trigger_refresh();
     reset_idle_timer();
-    set_current_command(CMD_HOME);
+    set_current_command(wallter::CMD_HOME);
 
     uint64_t start = now_ms();
     while (current_cmd != CMD_STOP) {
@@ -520,165 +521,6 @@ static void run_homing_blocking(uint32_t timeout_ms) {
     }
 }
 
-enum BootMenuChoice { MENU_CALIBRATE = 0, MENU_SELF_TEST = 1 };
-
-static BootMenuChoice run_boot_menu() {
-    int sel = 0;
-    bool prev_up = false;
-    bool prev_dn = false;
-    bool prev_both = false;
-    display.set_refresh_rate(0.2f);
-
-    auto render = [&]() {
-        if (sel == 0) {
-            display.print(">Calibrate", " Run self test");
-        } else {
-            display.print(" Calibrate", ">Run self test");
-        }
-    };
-    render();
-
-    // Wait for initial release to avoid auto-activating due to boot hold
-    while (read_extend_pressed() || read_retract_pressed()) {
-        vTaskDelay(pdMS_TO_TICKS(30));
-    }
-    prev_up = false;
-    prev_dn = false;
-    prev_both = false;
-
-    while (1) {
-        bool up = read_extend_pressed();
-        bool dn = read_retract_pressed();
-        bool both = up && dn;
-
-        if (!both) {
-            if (up && !prev_up) {
-                sel = (sel + 1) % 2;
-                render();
-            }
-            if (dn && !prev_dn) {
-                sel = (sel + 1) % 2;
-                render();
-            }
-        }
-        if (both && !prev_both) {
-            // Confirm selection
-            while (read_extend_pressed() || read_retract_pressed()) {
-                vTaskDelay(pdMS_TO_TICKS(30));
-            }
-            return (sel == 0) ? MENU_CALIBRATE : MENU_SELF_TEST;
-        }
-
-        prev_up = up;
-        prev_dn = dn;
-        prev_both = both;
-        vTaskDelay(pdMS_TO_TICKS(40));
-    }
-}
-
-static void run_calibration_mode() {
-    // Start by homing fully ("board all the way back")
-    run_homing_blocking(/*timeout_ms=*/45000);
-
-    // Calibration loop for 20..60 degrees in 5 degree steps
-    bool prev_up = false;
-    bool prev_dn = false;
-    bool prev_both = false;
-
-    uint32_t last_ui_ticks = 0xFFFFFFFFu;
-    int last_ui_angle = -1;
-    uint64_t last_ui_ms = 0;
-
-    for (int angle = CAL_FIRST_ANGLE; angle <= CAL_LAST_ANGLE; angle += CAL_STEP_ANGLE) {
-        int idx = wallter::angle_to_index(angle);
-        if (idx < 0) {
-            panicf("BAD ANG %d", angle);
-        }
-        g_target_idx = (uint32_t)idx;
-        // Ensure we are stopped before starting adjustments for this angle
-        set_current_command(CMD_STOP);
-
-        while (1) {
-            // Drive motors toward current target ticks for this angle
-            int32_t pos = motors[MASTER_MOTOR].getPosition();
-            uint32_t tgt = g_target_ticks[g_target_idx];
-            if (pos < (int32_t)tgt) {
-                set_current_command(CMD_EXTEND);
-            } else if (pos > (int32_t)tgt) {
-                set_current_command(CMD_RETRACT);
-            } else {
-                set_current_command(CMD_STOP);
-            }
-
-            motor_control_iteration();
-
-            // UI: "20: <hal cnt>"
-            char line1[17];
-            snprintf(line1, sizeof(line1), "%d: %lu", angle, (unsigned long)g_target_ticks[g_target_idx]);
-            // Avoid hammering I2C: only update when changed or periodically.
-            uint64_t tnow = now_ms();
-            uint32_t cur_ticks = g_target_ticks[g_target_idx];
-            if (angle != last_ui_angle || cur_ticks != last_ui_ticks || (tnow - last_ui_ms) > 250ULL) {
-                display.print(line1, "");
-                last_ui_angle = angle;
-                last_ui_ticks = cur_ticks;
-                last_ui_ms = tnow;
-            }
-
-            bool up = read_extend_pressed();
-            bool dn = read_retract_pressed();
-            bool both = up && dn;
-
-            if (!both) {
-                if (up && !prev_up) {
-                    g_target_ticks[g_target_idx] += CAL_ADJUST_STEP_TICKS;
-                }
-                if (dn && !prev_dn) {
-                    if (g_target_ticks[g_target_idx] >= CAL_ADJUST_STEP_TICKS) {
-                        g_target_ticks[g_target_idx] -= CAL_ADJUST_STEP_TICKS;
-                    } else {
-                        g_target_ticks[g_target_idx] = 0;
-                    }
-                }
-            }
-
-            if (both && !prev_both) {
-                // Store current calibration (angles 20..60)
-                wallter::calibration::save_from_target_ticks(g_target_ticks, MAX_ANGLES);
-                display.print("stored", "");
-                uint64_t end = now_ms() + 600ULL;
-                while (now_ms() < end) {
-                    vTaskDelay(pdMS_TO_TICKS(30));
-                }
-                // Wait for button release so we don't double-trigger
-                while (read_extend_pressed() || read_retract_pressed()) {
-                    vTaskDelay(pdMS_TO_TICKS(30));
-                }
-                break; // next angle
-            }
-
-            prev_up = up;
-            prev_dn = dn;
-            prev_both = both;
-            vTaskDelay(pdMS_TO_TICKS(60));
-        }
-    }
-
-    // Derive 15 degrees entry again, and return to home.
-    {
-        int idx20 = wallter::angle_to_index(20);
-        int idx15 = wallter::angle_to_index(15);
-        if (idx20 >= 0 && idx15 >= 0) {
-            g_target_ticks[idx15] = g_target_ticks[idx20] / 2U;
-        }
-        g_target_ticks[0] = 0;
-    }
-
-    display.print("Cal complete", "Homing...");
-    run_homing_blocking(/*timeout_ms=*/45000);
-}
-
-static void run_self_test_sequence();
 
 extern "C" void app_main(void) {
     ESP_LOGI(TAG, "Init");
@@ -689,6 +531,23 @@ extern "C" void app_main(void) {
 
     setup();
 
+    wallter::modes::Services svc;
+    svc.display = &display;
+    svc.motors = motors;
+    svc.num_motors = NUM_MOTORS;
+    svc.master_motor_index = MASTER_MOTOR;
+    svc.target_ticks = g_target_ticks;
+    svc.max_angles = MAX_ANGLES;
+    svc.target_idx = &g_target_idx;
+    svc.read_extend_pressed = &read_extend_pressed;
+    svc.read_retract_pressed = &read_retract_pressed;
+    svc.set_current_command = &set_current_command;
+    svc.motor_control_iteration = &motor_control_iteration;
+    svc.run_homing_blocking = &run_homing_blocking;
+    svc.reset_tick_counters = &reset_tick_counters;
+    svc.panicf = &panicf;
+    svc.now_ms = &now_ms;
+
     // Boot menu: hold EXTEND while starting (latched during setup after GPIO config)
     bool boot_extend = g_boot_menu_requested;
     bool boot_retract = read_retract_pressed();
@@ -697,12 +556,12 @@ extern "C" void app_main(void) {
         g_extend_pressed = false;
         g_retract_pressed = false;
 
-        BootMenuChoice choice = run_boot_menu();
-        if (choice == MENU_CALIBRATE) {
+        wallter::modes::BootMenuChoice choice = wallter::modes::run_boot_menu(svc);
+        if (choice == wallter::modes::MENU_CALIBRATE) {
             display.print("Calibration", "Starting...");
-            run_calibration_mode();
+            wallter::modes::run_calibration_mode(svc);
         } else {
-            run_self_test_sequence();
+            wallter::modes::run_self_test_sequence(svc);
         }
 
         // Re-load calibration after a calibration run (ensures interpolation is applied consistently)
@@ -853,83 +712,4 @@ static void handle_buttons() {
         set_current_command(CMD_RETRACT);
     }
     display.trigger_refresh();
-}
-
-// Extracted self-test to re-use in boot menu.
-static void run_self_test_sequence() {
-    const int test_speed = MINSPEED;
-    const int test_time  = 1000;
-    ESP_LOGI(TAG, "Self-test started.");
-    ESP_LOGI(TAG, "ST: init pos=[%ld %ld] si=[%lu %lu] so=[%lu %lu]",
-         (long)motors[0].getPosition(), (long)motors[1].getPosition(),
-         (unsigned long)motors[0].getStepsIn(), (unsigned long)motors[1].getStepsIn(),
-         (unsigned long)motors[0].getStepsOut(), (unsigned long)motors[1].getStepsOut());
-    display.print("Self test 1", "Extending.");
-
-    // Retract then extend
-    ESP_LOGI(TAG, "ST: retract phase start, speed=%d", test_speed);
-    for (int i = 0; i < NUM_MOTORS; i++) motors[i].setSpeed(-test_speed);
-    ESP_LOGI(TAG, "ST: retract phase running...");
-    vTaskDelay(pdMS_TO_TICKS(test_time + 500));
-    ESP_LOGI(TAG, "ST: retract done. si=[%lu %lu] so=[%lu %lu]",
-         (unsigned long)motors[0].getStepsIn(), (unsigned long)motors[1].getStepsIn(),
-         (unsigned long)motors[0].getStepsOut(), (unsigned long)motors[1].getStepsOut());
-    reset_tick_counters(0, true);
-    ESP_LOGI(TAG, "ST: counters reset. si=[%lu %lu] so=[%lu %lu]",
-         (unsigned long)motors[0].getStepsIn(), (unsigned long)motors[1].getStepsIn(),
-         (unsigned long)motors[0].getStepsOut(), (unsigned long)motors[1].getStepsOut());
-    for (int i = 0; i < NUM_MOTORS; i++) motors[i].setSpeed(test_speed);
-    ESP_LOGI(TAG, "ST: extend phase start, speed=%d", test_speed);
-    vTaskDelay(pdMS_TO_TICKS(test_time));
-    ESP_LOGI(TAG, "ST: extend done. si=[%lu %lu] so=[%lu %lu]",
-         (unsigned long)motors[0].getStepsIn(), (unsigned long)motors[1].getStepsIn(),
-         (unsigned long)motors[0].getStepsOut(), (unsigned long)motors[1].getStepsOut());
-    display.print("Phase 1 done", "Checking...");
-    for (int i = 0; i < NUM_MOTORS; i++) motors[i].setSpeed(0);
-    ESP_LOGI(TAG, "ST: motors stopped after phase 1.");
-    for (int i = 0; i < NUM_MOTORS; i++) {
-        if (motors[i].getStepsOut() < 100U) {
-            ESP_LOGE(TAG, "Self-test failed: motor %d si:%d so:%d", i, (int)motors[i].getStepsIn(), (int)motors[i].getStepsOut());
-            char tbuf[32];
-            snprintf(tbuf, sizeof(tbuf), "M:%d SO:%d", i, (int)motors[i].getStepsOut());
-            display.print("SELF TEST FAILED", tbuf);
-            panicf("M%d NO OUT", i);
-        }
-    }
-
-    display.print("Self test 2", "Retracting.");
-    ESP_LOGI(TAG, "ST: phase 2 retract start.");
-    for (int i = 0; i < NUM_MOTORS; i++) motors[i].setSpeed(-test_speed);
-    vTaskDelay(pdMS_TO_TICKS(test_time));
-    ESP_LOGI(TAG, "ST: phase 2 retract done. si=[%lu %lu] so=[%lu %lu]",
-         (unsigned long)motors[0].getStepsIn(), (unsigned long)motors[1].getStepsIn(),
-         (unsigned long)motors[0].getStepsOut(), (unsigned long)motors[1].getStepsOut());
-    display.print("Phase 2 done", "Checking...");
-    for (int i = 0; i < NUM_MOTORS; i++) motors[i].setSpeed(0);
-    ESP_LOGI(TAG, "ST: motors stopped after phase 2.");
-    for (int i = 0; i < NUM_MOTORS; i++) {
-        if (motors[i].getStepsIn() < 100U) {
-            ESP_LOGE(TAG, "Self-test failed: motor %d si:%d so:%d", i, (int)motors[i].getStepsIn(), (int)motors[i].getStepsOut());
-            char tbuf[32];
-            snprintf(tbuf, sizeof(tbuf), "M:%d SI:%d", i, (int)motors[i].getStepsIn());
-            display.print("SELF TEST FAILED:", tbuf);
-            panicf("M%d NO IN", i);
-        }
-    }
-    bool final_success = true;
-    for (int i = 0; i < NUM_MOTORS; ++i) {
-        if (abs((int)motors[i].getStepsOut() - (int)motors[i].getStepsIn()) > 200) {
-            final_success = false;
-        }
-    }
-    if (!final_success) {
-        display.print("FAIL: BAD SENSOR DATA", "Check connections.");
-        panicf("CHECK CONNECTIONS");
-    }
-    display.print("Self test", "PASSED");
-    uint64_t end_ms = now_ms() + 1500ULL;
-    while (now_ms() < end_ms) {
-        display.refresh();
-        vTaskDelay(pdMS_TO_TICKS(50));
-    }
 }
