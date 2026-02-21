@@ -1,7 +1,5 @@
 #include "esp_log.h"
 #include "esp_timer.h"
-#include "nvs.h"
-#include "nvs_flash.h"
 #include "driver/gpio.h"
 #include "driver/gpio_filter.h"
 #include <stdarg.h>
@@ -10,8 +8,9 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
-#define BOARD_TYPE BOARD_TYPE_ARCTIC_CYTRON
-#include "boards.h"
+#include "app_config.hpp"
+#include "angle_utils.hpp"
+#include "calibration_store.hpp"
 #include "display.hpp"
 #include "motordriver.hpp"
 #include "buttons.hpp"
@@ -93,29 +92,17 @@ static void enable_hal_irqs() {
 
 // Idle helpers and master speed computation
 // Target positions (ticks) for angles (match Arduino flow)
-static const uint32_t DEFAULT_TARGET_TICKS[] = {0, 3000, 6000, 9000, 12500, 16400, 20000, 24000, 29000, 33000, 37000};
-static const int MAX_ANGLES = sizeof(DEFAULT_TARGET_TICKS) / sizeof(DEFAULT_TARGET_TICKS[0]);
+static constexpr int MAX_ANGLES = wallter::kMaxAngles;
 static uint32_t g_target_ticks[MAX_ANGLES] = {0};
 static uint32_t g_target_idx = 0;
 static uint32_t target_ticks_retracting  = 0;
 static uint32_t target_ticks_extending   = 0;
 
-// Calibration storage (NVS)
-static constexpr const char *CAL_NVS_NAMESPACE = "wallter";
-static constexpr const char *CAL_NVS_KEY_BLOB  = "cal_ticks_v1";
-static constexpr uint32_t CAL_BLOB_MAGIC = 0x57414C54; // 'WALT'
-
-static constexpr int CAL_FIRST_ANGLE = 20;
-static constexpr int CAL_LAST_ANGLE  = 60;
-static constexpr int CAL_STEP_ANGLE  = 5;
-static constexpr int CAL_COUNT = ((CAL_LAST_ANGLE - CAL_FIRST_ANGLE) / CAL_STEP_ANGLE) + 1; // 9
+static constexpr int CAL_FIRST_ANGLE = wallter::calibration::kFirstAngle;
+static constexpr int CAL_LAST_ANGLE  = wallter::calibration::kLastAngle;
+static constexpr int CAL_STEP_ANGLE  = wallter::calibration::kStepAngle;
+static constexpr int CAL_COUNT       = wallter::calibration::kCount;
 static constexpr uint32_t CAL_ADJUST_STEP_TICKS = 50;
-
-struct CalBlobV1 {
-    uint32_t magic;
-    uint32_t version;
-    uint32_t ticks[CAL_COUNT]; // angles 20..60 step 5
-};
 
 static inline uint64_t now_ms() {
     return (uint64_t)(esp_timer_get_time() / 1000ULL);
@@ -128,110 +115,7 @@ static inline bool read_retract_pressed() {
     return (gpio_get_level((gpio_num_t)BUTTON_RETRACT_PIN) == 0);
 }
 
-static int angle_to_index(int angle_deg) {
-    if (angle_deg < LOWEST_ANGLE || angle_deg > HIGHEST_ANGLE) {
-        return -1;
-    }
-    int delta = angle_deg - LOWEST_ANGLE;
-    if ((delta % ANGLE_STEP) != 0) {
-        return -1;
-    }
-    int idx = delta / ANGLE_STEP;
-    if (idx < 0 || idx >= MAX_ANGLES) {
-        return -1;
-    }
-    return idx;
-}
 
-static void init_target_ticks_defaults() {
-    for (int i = 0; i < MAX_ANGLES; ++i) {
-        g_target_ticks[i] = DEFAULT_TARGET_TICKS[i];
-    }
-}
-
-static esp_err_t init_nvs_once() {
-    esp_err_t err = nvs_flash_init();
-    if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
-        ESP_LOGW(TAG, "NVS init: erasing flash (%d)", (int)err);
-        ESP_ERROR_CHECK(nvs_flash_erase());
-        err = nvs_flash_init();
-    }
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "NVS init failed: %d", (int)err);
-    }
-    return err;
-}
-
-static void apply_calibration_to_target_ticks(const CalBlobV1 &blob) {
-    // Apply stored ticks for angles 20..60 step 5
-    for (int i = 0; i < CAL_COUNT; ++i) {
-        int angle = CAL_FIRST_ANGLE + i * CAL_STEP_ANGLE;
-        int idx = angle_to_index(angle);
-        if (idx >= 0) {
-            g_target_ticks[idx] = blob.ticks[i];
-        }
-    }
-    // The control table includes 15 degrees; derive it by interpolation between 10deg (0) and 20deg.
-    int idx20 = angle_to_index(20);
-    int idx15 = angle_to_index(15);
-    if (idx20 >= 0 && idx15 >= 0) {
-        g_target_ticks[idx15] = g_target_ticks[idx20] / 2U;
-    }
-    // Always ensure home (lowest angle) is 0 ticks.
-    g_target_ticks[0] = 0;
-}
-
-static bool load_calibration_from_nvs() {
-    init_target_ticks_defaults();
-
-    nvs_handle_t handle;
-    esp_err_t err = nvs_open(CAL_NVS_NAMESPACE, NVS_READONLY, &handle);
-    if (err != ESP_OK) {
-        ESP_LOGI(TAG, "No calibration namespace yet (%d); using defaults", (int)err);
-        return false;
-    }
-
-    CalBlobV1 blob = {};
-    size_t len = sizeof(blob);
-    err = nvs_get_blob(handle, CAL_NVS_KEY_BLOB, &blob, &len);
-    nvs_close(handle);
-    if (err != ESP_OK || len != sizeof(blob)) {
-        ESP_LOGI(TAG, "No calibration blob (%d, len=%u); using defaults", (int)err, (unsigned)len);
-        return false;
-    }
-    if (blob.magic != CAL_BLOB_MAGIC || blob.version != 1U) {
-        ESP_LOGW(TAG, "Calibration blob invalid (magic=0x%08lx ver=%lu)", (unsigned long)blob.magic, (unsigned long)blob.version);
-        return false;
-    }
-    apply_calibration_to_target_ticks(blob);
-    ESP_LOGI(TAG, "Calibration loaded from NVS");
-    return true;
-}
-
-static esp_err_t save_calibration_to_nvs(const uint32_t ticks_20_60[CAL_COUNT]) {
-    CalBlobV1 blob = {};
-    blob.magic = CAL_BLOB_MAGIC;
-    blob.version = 1U;
-    for (int i = 0; i < CAL_COUNT; ++i) {
-        blob.ticks[i] = ticks_20_60[i];
-    }
-
-    nvs_handle_t handle;
-    esp_err_t err = nvs_open(CAL_NVS_NAMESPACE, NVS_READWRITE, &handle);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "NVS open failed: %d", (int)err);
-        return err;
-    }
-    err = nvs_set_blob(handle, CAL_NVS_KEY_BLOB, &blob, sizeof(blob));
-    if (err == ESP_OK) {
-        err = nvs_commit(handle);
-    }
-    nvs_close(handle);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "NVS save failed: %d", (int)err);
-    }
-    return err;
-}
 
 // Command identifiers
 enum { CMD_STOP = 0, CMD_EXTEND = 1, CMD_RETRACT = 2, CMD_HOME = 3 };
@@ -706,7 +590,7 @@ static void run_calibration_mode() {
     uint64_t last_ui_ms = 0;
 
     for (int angle = CAL_FIRST_ANGLE; angle <= CAL_LAST_ANGLE; angle += CAL_STEP_ANGLE) {
-        int idx = angle_to_index(angle);
+        int idx = wallter::angle_to_index(angle);
         if (idx < 0) {
             panicf("BAD ANG %d", angle);
         }
@@ -760,13 +644,7 @@ static void run_calibration_mode() {
 
             if (both && !prev_both) {
                 // Store current calibration (angles 20..60)
-                uint32_t ticks[CAL_COUNT];
-                for (int i = 0; i < CAL_COUNT; ++i) {
-                    int a = CAL_FIRST_ANGLE + i * CAL_STEP_ANGLE;
-                    int ii = angle_to_index(a);
-                    ticks[i] = (ii >= 0) ? g_target_ticks[ii] : 0;
-                }
-                save_calibration_to_nvs(ticks);
+                wallter::calibration::save_from_target_ticks(g_target_ticks, MAX_ANGLES);
                 display.print("stored", "");
                 uint64_t end = now_ms() + 600ULL;
                 while (now_ms() < end) {
@@ -788,8 +666,8 @@ static void run_calibration_mode() {
 
     // Derive 15 degrees entry again, and return to home.
     {
-        int idx20 = angle_to_index(20);
-        int idx15 = angle_to_index(15);
+        int idx20 = wallter::angle_to_index(20);
+        int idx15 = wallter::angle_to_index(15);
         if (idx20 >= 0 && idx15 >= 0) {
             g_target_ticks[idx15] = g_target_ticks[idx20] / 2U;
         }
@@ -806,8 +684,8 @@ extern "C" void app_main(void) {
     ESP_LOGI(TAG, "Init");
 
     // NVS for calibration persistence
-    init_nvs_once();
-    load_calibration_from_nvs();
+    wallter::calibration::init_nvs();
+    wallter::calibration::load_or_default(g_target_ticks, MAX_ANGLES);
 
     setup();
 
@@ -828,7 +706,7 @@ extern "C" void app_main(void) {
         }
 
         // Re-load calibration after a calibration run (ensures interpolation is applied consistently)
-        load_calibration_from_nvs();
+        wallter::calibration::load_or_default(g_target_ticks, MAX_ANGLES);
         g_extend_pressed = false;
         g_retract_pressed = false;
         g_boot_menu_requested = false;
