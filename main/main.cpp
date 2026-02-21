@@ -1,8 +1,5 @@
 #include "esp_log.h"
 #include "esp_timer.h"
-#include "driver/gpio.h"
-#include "driver/gpio_filter.h"
-#include "hal/gpio_ll.h"
 #include <stdio.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -13,9 +10,9 @@
 #include "commands.hpp"
 #include "modes.hpp"
 #include "motor_control.hpp"
+#include "inputs.hpp"
 #include "display.hpp"
 #include "motordriver.hpp"
-#include "buttons.hpp"
 
 static const char *TAG = "main";
 
@@ -34,62 +31,8 @@ static MotorDriver motors[NUM_MOTORS] = {
 #endif
 };
 
-// Hardware glitch filters
-static gpio_glitch_filter_handle_t btn_extend_filter = nullptr;
-static gpio_glitch_filter_handle_t btn_retract_filter = nullptr;
-static gpio_glitch_filter_handle_t hal_clk_filter[NUM_MOTORS] [[maybe_unused]] = {};
-
-static volatile bool g_extend_pressed = false;
-static volatile bool g_retract_pressed = false;
-static bool g_boot_menu_requested = false;
-
 // Master motor index (tune as needed)
 #define MASTER_MOTOR 0
-
-// Software edge filter for HAL clocks (aggressive debounce)
-static uint64_t g_last_clk_us[NUM_MOTORS] = {0};
-static const uint32_t HAL_CLK_FILTER_US = 80; // ignore edges within 80us
-
-// Hardware glitch filter handles debouncing; no manual checks needed
-
-static void IRAM_ATTR isr_button_extend(void *arg) {
-    (void)arg;
-    g_extend_pressed = (gpio_ll_get_level(&GPIO, (gpio_num_t)BUTTON_EXTEND_PIN) == 0);
-}
-static void IRAM_ATTR isr_button_retract(void *arg) {
-    (void)arg;
-    g_retract_pressed = (gpio_ll_get_level(&GPIO, (gpio_num_t)BUTTON_RETRACT_PIN) == 0);
-}
-
-static void IRAM_ATTR isr_hal_clk(void *arg) {
-    int idx = (int)(intptr_t)arg;
-    uint64_t now_us = (uint64_t)esp_timer_get_time();
-    uint64_t last_us = g_last_clk_us[idx];
-    if (last_us != 0 && (now_us - last_us) < HAL_CLK_FILTER_US) {
-        // Ignore spurious fast edges
-        return;
-    }
-    g_last_clk_us[idx] = now_us;
-    int cnt = gpio_ll_get_level(&GPIO, (gpio_num_t)HAL_CNT[idx]);
-    if (cnt == 0) {
-        motors[idx].incrementStepIn();
-    } else {
-        motors[idx].incrementStepOut();
-    }
-}
-
-// HAL clock IRQ management
-static void enable_hal_irqs() {
-    for (int i = 0; i < NUM_MOTORS; ++i) {
-        gpio_isr_handler_add((gpio_num_t)HAL_CLK[i], isr_hal_clk, (void*)(intptr_t)i);
-    }
-}
-
-[[maybe_unused]] static void disable_hal_irqs() {
-    for (int i = 0; i < NUM_MOTORS; ++i) {
-        gpio_isr_handler_remove((gpio_num_t)HAL_CLK[i]);
-    }
-}
 
 // Idle helpers and master speed computation
 // Target positions (ticks) for angles (match Arduino flow)
@@ -101,63 +44,7 @@ static inline uint64_t now_ms() {
     return (uint64_t)(esp_timer_get_time() / 1000ULL);
 }
 
-static inline bool read_extend_pressed() {
-    return (gpio_get_level((gpio_num_t)BUTTON_EXTEND_PIN) == 0);
-}
-static inline bool read_retract_pressed() {
-    return (gpio_get_level((gpio_num_t)BUTTON_RETRACT_PIN) == 0);
-}
-
 // Motor control state machine lives in wallter::control
-
-static void configure_gpio() {
-    gpio_config_t io = {};
-    io.mode = GPIO_MODE_INPUT;
-    io.intr_type = GPIO_INTR_NEGEDGE;
-    io.pull_up_en = GPIO_PULLUP_ENABLE;
-    io.pin_bit_mask = (1ULL << BUTTON_EXTEND_PIN) | (1ULL << BUTTON_RETRACT_PIN);
-    gpio_config(&io);
-
-    gpio_install_isr_service(0);
-    gpio_isr_handler_add((gpio_num_t)BUTTON_EXTEND_PIN, isr_button_extend, NULL);
-    gpio_isr_handler_add((gpio_num_t)BUTTON_RETRACT_PIN, isr_button_retract, NULL);
-
-    // Create button glitch filters
-    gpio_pin_glitch_filter_config_t bcfg = {};
-    bcfg.gpio_num = (gpio_num_t)BUTTON_EXTEND_PIN;
-    gpio_new_pin_glitch_filter(&bcfg, &btn_extend_filter);
-    bcfg.gpio_num = (gpio_num_t)BUTTON_RETRACT_PIN;
-    gpio_new_pin_glitch_filter(&bcfg, &btn_retract_filter);
-
-    gpio_config_t clk = {};
-    clk.mode = GPIO_MODE_INPUT;
-    clk.intr_type = GPIO_INTR_POSEDGE;
-    // Ensure HAL clock pins use pull-ups
-    clk.pull_up_en = GPIO_PULLUP_ENABLE;
-    clk.pull_down_en = GPIO_PULLDOWN_DISABLE;
-    uint64_t mask = 0;
-    for (int i = 0; i < NUM_MOTORS; ++i) mask |= (1ULL << HAL_CLK[i]);
-    clk.pin_bit_mask = mask;
-    gpio_config(&clk);
-    // Ensure HAL count pins use pull-ups as well
-    gpio_config_t cnt = {};
-    cnt.mode = GPIO_MODE_INPUT;
-    cnt.intr_type = GPIO_INTR_DISABLE;
-    cnt.pull_up_en = GPIO_PULLUP_ENABLE;
-    cnt.pull_down_en = GPIO_PULLDOWN_DISABLE;
-    mask = 0;
-    for (int i = 0; i < NUM_MOTORS; ++i) mask |= (1ULL << HAL_CNT[i]);
-    cnt.pin_bit_mask = mask;
-    gpio_config(&cnt);
-    // Optionally create HAL clock pin glitch filters (not enabled by default)
-    for (int i = 0; i < NUM_MOTORS; ++i) {
-        // Uncomment to enable HAL clock filters if needed
-        // gpio_pin_glitch_filter_config_t cfg = {};
-        // cfg.gpio_num = (gpio_num_t)HAL_CLK[i];
-        // gpio_new_pin_glitch_filter(&cfg, &hal_clk_filter[i]);
-    }
-    // HAL clock ISR handlers added via enable_hal_irqs()
-}
 
 
 extern "C" void app_main(void) {
@@ -177,8 +64,8 @@ extern "C" void app_main(void) {
     svc.target_ticks = g_target_ticks;
     svc.max_angles = MAX_ANGLES;
     svc.target_idx = &g_target_idx;
-    svc.read_extend_pressed = &read_extend_pressed;
-    svc.read_retract_pressed = &read_retract_pressed;
+    svc.read_extend_pressed = &wallter::inputs::read_extend_pressed;
+    svc.read_retract_pressed = &wallter::inputs::read_retract_pressed;
     svc.set_current_command = &wallter::control::set_command;
     svc.motor_control_iteration = &wallter::control::iterate;
     svc.run_homing_blocking = &wallter::control::run_homing_blocking;
@@ -187,12 +74,11 @@ extern "C" void app_main(void) {
     svc.now_ms = &now_ms;
 
     // Boot menu: hold EXTEND while starting (latched during setup after GPIO config)
-    bool boot_extend = g_boot_menu_requested;
-    bool boot_retract = read_retract_pressed();
+    bool boot_extend = wallter::inputs::boot_menu_requested();
+    bool boot_retract = wallter::inputs::read_retract_pressed();
     if (boot_extend) {
         // Clear any latched interrupt flags before entering menu.
-        g_extend_pressed = false;
-        g_retract_pressed = false;
+        wallter::inputs::clear_button_events();
 
         wallter::modes::BootMenuChoice choice = wallter::modes::run_boot_menu(svc);
         if (choice == wallter::modes::MENU_CALIBRATE) {
@@ -204,9 +90,8 @@ extern "C" void app_main(void) {
 
         // Re-load calibration after a calibration run (ensures interpolation is applied consistently)
         wallter::calibration::load_or_default(g_target_ticks, MAX_ANGLES);
-        g_extend_pressed = false;
-        g_retract_pressed = false;
-        g_boot_menu_requested = false;
+        wallter::inputs::clear_button_events();
+        wallter::inputs::clear_boot_menu_requested();
     } else {
         (void)boot_retract;
         ESP_LOGI(TAG, "Normal boot: skipping self-test (use boot menu)");
@@ -246,22 +131,7 @@ extern "C" void app_main(void) {
 // Extracted setup routine (Arduino-style)
 static void setup() {
     // Configure GPIO early so the boot-menu hold can be latched quickly.
-    configure_gpio();
-    // Enable button glitch filters for simple debounce
-    if (btn_extend_filter) {
-        gpio_glitch_filter_enable(btn_extend_filter);
-    }
-    if (btn_retract_filter) {
-        gpio_glitch_filter_enable(btn_retract_filter);
-    }
-    // Latch initial button states (active-low)
-    g_boot_menu_requested = (gpio_get_level((gpio_num_t)BUTTON_EXTEND_PIN) == 0);
-    if (g_boot_menu_requested) {
-        g_extend_pressed = true;
-    }
-    if (gpio_get_level((gpio_num_t)BUTTON_RETRACT_PIN) == 0) {
-        g_retract_pressed = true;
-    }
+    wallter::inputs::init(motors, NUM_MOTORS);
 
     // Init motors and display
     for (int i = 0; i < NUM_MOTORS; ++i) motors[i].init();
@@ -271,9 +141,6 @@ static void setup() {
     display.set_refresh_rate(1.0f);
     // Run startup animation like old display
     display.startup_animation();
-
-    // Add HAL clock IRQs (equivalent to Arduino attachInterrupt on HAL_CLK)
-    enable_hal_irqs();
 
     wallter::control::Context ctx;
     ctx.display = &display;
@@ -312,10 +179,6 @@ static void setup() {
 
 // Replicate Arduino handle_buttons() logic without blocking loops
 static void handle_buttons() {
-    bool extend  = g_extend_pressed;
-    bool retract = g_retract_pressed;
-    g_extend_pressed  = false;
-    g_retract_pressed = false;
-
-    wallter::control::handle_buttons(extend, retract);
+    auto e = wallter::inputs::poll_button_events();
+    wallter::control::handle_buttons(e.extend, e.retract);
 }
