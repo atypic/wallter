@@ -35,10 +35,11 @@ static MotorDriver motors[NUM_MOTORS] = {
 // Hardware glitch filters
 static gpio_glitch_filter_handle_t btn_extend_filter = nullptr;
 static gpio_glitch_filter_handle_t btn_retract_filter = nullptr;
-static gpio_glitch_filter_handle_t hal_clk_filter[NUM_MOTORS] = {};
+static gpio_glitch_filter_handle_t hal_clk_filter[NUM_MOTORS] [[maybe_unused]] = {};
 
 static volatile bool g_extend_pressed = false;
 static volatile bool g_retract_pressed = false;
+static bool g_boot_menu_requested = false;
 
 // Master motor index and motion constants (tune as needed)
 #define MASTER_MOTOR 0
@@ -84,7 +85,7 @@ static void enable_hal_irqs() {
     }
 }
 
-static void disable_hal_irqs() {
+[[maybe_unused]] static void disable_hal_irqs() {
     for (int i = 0; i < NUM_MOTORS; ++i) {
         gpio_isr_handler_remove((gpio_num_t)HAL_CLK[i]);
     }
@@ -700,6 +701,10 @@ static void run_calibration_mode() {
     bool prev_dn = false;
     bool prev_both = false;
 
+    uint32_t last_ui_ticks = 0xFFFFFFFFu;
+    int last_ui_angle = -1;
+    uint64_t last_ui_ms = 0;
+
     for (int angle = CAL_FIRST_ANGLE; angle <= CAL_LAST_ANGLE; angle += CAL_STEP_ANGLE) {
         int idx = angle_to_index(angle);
         if (idx < 0) {
@@ -726,7 +731,15 @@ static void run_calibration_mode() {
             // UI: "20: <hal cnt>"
             char line1[17];
             snprintf(line1, sizeof(line1), "%d: %lu", angle, (unsigned long)g_target_ticks[g_target_idx]);
-            display.print(line1, "");
+            // Avoid hammering I2C: only update when changed or periodically.
+            uint64_t tnow = now_ms();
+            uint32_t cur_ticks = g_target_ticks[g_target_idx];
+            if (angle != last_ui_angle || cur_ticks != last_ui_ticks || (tnow - last_ui_ms) > 250ULL) {
+                display.print(line1, "");
+                last_ui_angle = angle;
+                last_ui_ticks = cur_ticks;
+                last_ui_ms = tnow;
+            }
 
             bool up = read_extend_pressed();
             bool dn = read_retract_pressed();
@@ -798,8 +811,8 @@ extern "C" void app_main(void) {
 
     setup();
 
-    // Boot menu: hold EXTEND while starting
-    bool boot_extend = read_extend_pressed();
+    // Boot menu: hold EXTEND while starting (latched during setup after GPIO config)
+    bool boot_extend = g_boot_menu_requested;
     bool boot_retract = read_retract_pressed();
     if (boot_extend) {
         // Clear any latched interrupt flags before entering menu.
@@ -818,6 +831,7 @@ extern "C" void app_main(void) {
         load_calibration_from_nvs();
         g_extend_pressed = false;
         g_retract_pressed = false;
+        g_boot_menu_requested = false;
     } else {
         (void)boot_retract;
         ESP_LOGI(TAG, "Normal boot: skipping self-test (use boot menu)");
@@ -855,6 +869,24 @@ extern "C" void app_main(void) {
 
 // Extracted setup routine (Arduino-style)
 static void setup() {
+    // Configure GPIO early so the boot-menu hold can be latched quickly.
+    configure_gpio();
+    // Enable button glitch filters for simple debounce
+    if (btn_extend_filter) {
+        gpio_glitch_filter_enable(btn_extend_filter);
+    }
+    if (btn_retract_filter) {
+        gpio_glitch_filter_enable(btn_retract_filter);
+    }
+    // Latch initial button states (active-low)
+    g_boot_menu_requested = (gpio_get_level((gpio_num_t)BUTTON_EXTEND_PIN) == 0);
+    if (g_boot_menu_requested) {
+        g_extend_pressed = true;
+    }
+    if (gpio_get_level((gpio_num_t)BUTTON_RETRACT_PIN) == 0) {
+        g_retract_pressed = true;
+    }
+
     // Init motors and display
     for (int i = 0; i < NUM_MOTORS; ++i) motors[i].init();
     vTaskDelay(pdMS_TO_TICKS(500));
@@ -864,7 +896,6 @@ static void setup() {
     // Run startup animation like old display
     display.startup_animation();
 
-    configure_gpio();
     // Add HAL clock IRQs (equivalent to Arduino attachInterrupt on HAL_CLK)
     enable_hal_irqs();
 
@@ -872,21 +903,7 @@ static void setup() {
     reset_tick_counters(0, true);
     reset_motor_positions();
 
-    // Enable button glitch filters for simple debounce
-    if (btn_extend_filter) {
-        gpio_glitch_filter_enable(btn_extend_filter);
-    }
-    if (btn_retract_filter) {
-        gpio_glitch_filter_enable(btn_retract_filter);
-    }
-
-    // Latch initial button states (active-low) for manual mode/self-test logic
-    if (gpio_get_level((gpio_num_t)BUTTON_EXTEND_PIN) == 0) {
-        g_extend_pressed = true;
-    }
-    if (gpio_get_level((gpio_num_t)BUTTON_RETRACT_PIN) == 0) {
-        g_retract_pressed = true;
-    }
+    // (button filters + initial button latching handled before animation)
 
     // Configure follower PID motors
     for (int p = 1; p < NUM_MOTORS; p++) {
@@ -906,9 +923,7 @@ static void setup() {
     set_current_command(CMD_HOME);
     g_target_idx = 0;
 
-    // Ensure button ISRs configured
-    gpio_isr_handler_add((gpio_num_t)BUTTON_EXTEND_PIN, isr_button_extend, NULL);
-    gpio_isr_handler_add((gpio_num_t)BUTTON_RETRACT_PIN, isr_button_retract, NULL);
+    // Button ISRs configured in configure_gpio().
 
     // Initial display view matching Arduino setup
     display.update_target_view(LOWEST_ANGLE, 0);
