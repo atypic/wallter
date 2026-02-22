@@ -1,7 +1,12 @@
 #include "buttons.hpp"
 #include "esp_log.h"
 
-int compute_next_target_index(bool extend, bool retract, int current_idx, int max_angles) {
+int compute_next_target_index(bool extend,
+                              bool retract,
+                              int current_idx,
+                              int max_angles,
+                              int min_idx,
+                              int max_idx) {
     // Log button presses
     if (extend) {
         ESP_LOGI("buttons", "Extend pressed.");
@@ -10,26 +15,32 @@ int compute_next_target_index(bool extend, bool retract, int current_idx, int ma
         ESP_LOGI("buttons", "Retract pressed.");
     }
 
+    if (min_idx < 0) min_idx = 0;
+    if (max_idx < 0) max_idx = 0;
+    if (max_idx >= max_angles) max_idx = max_angles - 1;
+    if (min_idx > max_idx) {
+        min_idx = 0;
+        max_idx = max_angles - 1;
+    }
+
     int idx = current_idx;
+    if (idx < min_idx) idx = min_idx;
+    if (idx > max_idx) idx = max_idx;
     if (extend && !retract) {
-        if (current_idx < (max_angles - 1)) {
-            idx = current_idx + 1;
+        if (idx < max_idx) {
+            idx = idx + 1;
         } else {
             ESP_LOGW("buttons", "Max target; ignoring extend.");
         }
     } else if (!extend && retract) {
-        if (current_idx > 0) {
-            idx = current_idx - 1;
+        if (idx > min_idx) {
+            idx = idx - 1;
         } else {
             ESP_LOGW("buttons", "Min target; ignoring retract.");
         }
     }
-    if (idx < 0) {
-        idx = 0;
-    }
-    if (idx >= max_angles) {
-        idx = max_angles - 1;
-    }
+    if (idx < min_idx) idx = min_idx;
+    if (idx > max_idx) idx = max_idx;
     return idx;
 }
 

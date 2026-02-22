@@ -7,7 +7,9 @@
 // I2C device addresses
 constexpr uint8_t LCD_ADDRESS      = 0x3E;
 constexpr uint8_t RGB_ADDRESS      = 0x62; // classic
-constexpr uint8_t RGB_ADDRESS_V5   = 0x6A; // newer chip variant
+constexpr uint8_t RGB_ADDRESS_V5   = 0x30; // newer chip variant (matches Grove rgb_lcd v5)
+
+// Some clones use other addresses; keep as probe candidates in the implementation.
 
 // RGB registers (classic)
 constexpr uint8_t REG_MODE1  = 0x00;

@@ -21,4 +21,18 @@ bool load_or_default(uint32_t *target_ticks, int target_len);
 // Saves the current calibration slice (20..60 step 5) from the provided target table.
 esp_err_t save_from_target_ticks(const uint32_t *target_ticks, int target_len);
 
+// Additional metadata describing the usable angle range.
+// min/max are in degrees, aligned to the global ANGLE_STEP.
+struct CalMeta {
+	uint8_t min_angle_deg;
+	uint8_t max_angle_deg;
+};
+
+// Loads min/max angles from NVS if present; otherwise returns defaults.
+// Returns true if loaded from NVS.
+bool load_meta_or_default(CalMeta &out);
+
+// Saves min/max angles to NVS.
+esp_err_t save_meta(const CalMeta &meta);
+
 } // namespace wallter::calibration

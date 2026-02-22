@@ -13,6 +13,7 @@
 #include "inputs.hpp"
 #include "display.hpp"
 #include "motordriver.hpp"
+#include "factory_test.hpp"
 
 static const char *TAG = "main";
 
@@ -40,8 +41,52 @@ static constexpr int MAX_ANGLES = wallter::kMaxAngles;
 static uint32_t g_target_ticks[MAX_ANGLES] = {0};
 static uint32_t g_target_idx = 0;
 
+static wallter::calibration::CalMeta g_cal_meta = { (uint8_t)LOWEST_ANGLE, (uint8_t)HIGHEST_ANGLE };
+static int g_min_target_idx = 0;
+static int g_max_target_idx = 0;
+static uint32_t g_home_offset_raw_ticks = 0;
+
 static inline uint64_t now_ms() {
     return (uint64_t)(esp_timer_get_time() / 1000ULL);
+}
+
+static void apply_calibration_meta_and_shift() {
+    // Validate and compute indices.
+    int min_idx = wallter::angle_to_index((int)g_cal_meta.min_angle_deg);
+    int max_idx = wallter::angle_to_index((int)g_cal_meta.max_angle_deg);
+    if (min_idx < 0) min_idx = 0;
+    if (max_idx < 0) max_idx = MAX_ANGLES - 1;
+    if (min_idx > max_idx) {
+        min_idx = 0;
+        max_idx = MAX_ANGLES - 1;
+        g_cal_meta.min_angle_deg = (uint8_t)LOWEST_ANGLE;
+        g_cal_meta.max_angle_deg = (uint8_t)HIGHEST_ANGLE;
+    }
+
+    // Compute raw offset (in the unshifted table) for the chosen minimum.
+    g_home_offset_raw_ticks = g_target_ticks[min_idx];
+
+    // Shift in-place so that the min angle is tick 0. Angles below min become 0.
+    for (int i = 0; i < MAX_ANGLES; ++i) {
+        if (i < min_idx) {
+            g_target_ticks[i] = 0;
+            continue;
+        }
+        uint32_t t = g_target_ticks[i];
+        g_target_ticks[i] = (t >= g_home_offset_raw_ticks) ? (t - g_home_offset_raw_ticks) : 0;
+    }
+
+    g_min_target_idx = min_idx;
+    g_max_target_idx = max_idx;
+
+    if ((int)g_target_idx < g_min_target_idx) g_target_idx = (uint32_t)g_min_target_idx;
+    if ((int)g_target_idx > g_max_target_idx) g_target_idx = (uint32_t)g_max_target_idx;
+}
+
+static void load_calibration_all() {
+    wallter::calibration::load_or_default(g_target_ticks, MAX_ANGLES);
+    (void)wallter::calibration::load_meta_or_default(g_cal_meta);
+    apply_calibration_meta_and_shift();
 }
 
 // Motor control state machine lives in wallter::control
@@ -52,7 +97,7 @@ extern "C" void app_main(void) {
 
     // NVS for calibration persistence
     wallter::calibration::init_nvs();
-    wallter::calibration::load_or_default(g_target_ticks, MAX_ANGLES);
+    load_calibration_all();
 
     setup();
 
@@ -64,6 +109,8 @@ extern "C" void app_main(void) {
     svc.target_ticks = g_target_ticks;
     svc.max_angles = MAX_ANGLES;
     svc.target_idx = &g_target_idx;
+    svc.cal_meta = &g_cal_meta;
+    svc.home_offset_raw_ticks = &g_home_offset_raw_ticks;
     svc.read_extend_pressed = &wallter::inputs::read_extend_pressed;
     svc.read_retract_pressed = &wallter::inputs::read_retract_pressed;
     svc.set_current_command = &wallter::control::set_command;
@@ -89,7 +136,8 @@ extern "C" void app_main(void) {
         }
 
         // Re-load calibration after a calibration run (ensures interpolation is applied consistently)
-        wallter::calibration::load_or_default(g_target_ticks, MAX_ANGLES);
+        load_calibration_all();
+        wallter::control::update_limits(g_min_target_idx, g_max_target_idx, g_home_offset_raw_ticks);
         wallter::inputs::clear_button_events();
         wallter::inputs::clear_boot_menu_requested();
     } else {
@@ -99,7 +147,8 @@ extern "C" void app_main(void) {
 
     // Self testing done or skipped, let's go home.
     // Post-setup initial view
-    display.update_target_view(LOWEST_ANGLE, 0);
+    float initial_angle = (float)(LOWEST_ANGLE + (int)g_target_idx * ANGLE_STEP);
+    display.update_target_view(initial_angle, 0);
     display.update_homing_view();
     display.set_view(LCD_HOMING_VIEW);
 
@@ -130,6 +179,9 @@ extern "C" void app_main(void) {
 
 // Extracted setup routine (Arduino-style)
 static void setup() {
+#if CONFIG_WALLTER_FACTORY_TEST
+    wallter::factory_test::run();
+#endif
     // Configure GPIO early so the boot-menu hold can be latched quickly.
     wallter::inputs::init(motors, NUM_MOTORS);
 
@@ -150,6 +202,9 @@ static void setup() {
     ctx.target_ticks = g_target_ticks;
     ctx.max_angles = MAX_ANGLES;
     ctx.target_idx = &g_target_idx;
+    ctx.min_target_idx = g_min_target_idx;
+    ctx.max_target_idx = g_max_target_idx;
+    ctx.home_offset_raw_ticks = g_home_offset_raw_ticks;
     wallter::control::init(ctx);
 
     // Reset counters and positions like Arduino setup()
@@ -166,13 +221,14 @@ static void setup() {
         motors[p].pidStart();
     }
 
-    g_target_idx = 0;
+    g_target_idx = (uint32_t)g_min_target_idx;
     wallter::control::set_command(wallter::CMD_HOME);
 
     // Button ISRs configured in configure_gpio().
 
     // Initial display view matching Arduino setup
-    display.update_target_view(LOWEST_ANGLE, 0);
+    float initial_angle = (float)(LOWEST_ANGLE + (int)g_target_idx * ANGLE_STEP);
+    display.update_target_view(initial_angle, 0);
     display.update_homing_view();
     display.set_view(LCD_HOMING_VIEW);
 }

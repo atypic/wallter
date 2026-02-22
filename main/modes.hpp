@@ -2,6 +2,8 @@
 
 #include <stdint.h>
 
+#include "calibration_store.hpp"
+
 class Display;
 class MotorDriver;
 
@@ -19,6 +21,10 @@ struct Services {
     uint32_t *target_ticks{};
     int max_angles{};
     uint32_t *target_idx{};
+
+    // Calibration metadata (min/max usable angles) and derived homing offset.
+    wallter::calibration::CalMeta *cal_meta{};
+    uint32_t *home_offset_raw_ticks{};
 
     // Hardware button level reads (active-low -> true means pressed)
     bool (*read_extend_pressed)() = nullptr;

@@ -4,7 +4,12 @@
 // Pure helper functions to make button handling testable.
 
 // Compute next target index based on extend/retract presses and bounds.
-int compute_next_target_index(bool extend, bool retract, int current_idx, int max_angles);
+int compute_next_target_index(bool extend,
+                              bool retract,
+                              int current_idx,
+                              int max_angles,
+                              int min_idx,
+                              int max_idx);
 
 // Decide intended command given target vs current position.
 // Returns one of CMD_STOP, CMD_EXTEND, CMD_RETRACT, CMD_HOME.

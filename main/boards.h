@@ -129,17 +129,21 @@ static const bool g_has_keypad = false;
 #define LCD_SCL_PIN 6
 #define LCD_I2C_CLOCK_HZ 50000
 
-// HAL encoder pins
-static const unsigned int HAL_CLK[NUM_MOTORS] = {12, 10};
-static const unsigned int HAL_CNT[NUM_MOTORS] = {11, 9};
+// HAL encoder pins (as wired on the latest board spin)
+// Motor 0: HAL_CLK=GPIO46, HAL_CNT=GPIO9
+// Motor 1: HAL_CLK=GPIO10, HAL_CNT=GPIO11
+static const unsigned int HAL_CLK[NUM_MOTORS] = {46, 10};
+static const unsigned int HAL_CNT[NUM_MOTORS] = {9, 11};
 
-// Button pins
-#define BUTTON_EXTEND_PIN 21
-#define BUTTON_RETRACT_PIN 47
+// Button pins (swapped on hardware: EXTEND/RETRACT are flipped)
+#define BUTTON_EXTEND_PIN 47
+#define BUTTON_RETRACT_PIN 21
 
 // Motor driver pins (PWM/DIR)
-static const unsigned int HAL_PWM[NUM_MOTORS] = {8, 3};
-static const unsigned int HAL_DIR[NUM_MOTORS] = {17, 18};
+// Motor 0: PWM=GPIO16, DIR=GPIO17
+// Motor 1: PWM=GPIO18, DIR=GPIO8
+static const unsigned int HAL_PWM[NUM_MOTORS] = {16, 18};
+static const unsigned int HAL_DIR[NUM_MOTORS] = {17, 8};
 
 #endif
 

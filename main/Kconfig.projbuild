@@ -1,0 +1,39 @@
+menu "Wallter"
+
+config WALLTER_FACTORY_TEST
+    bool "Enable factory pin test mode"
+    default n
+    help
+        When enabled, the firmware boots into a factory-line test routine instead
+        of the normal application. The test toggles each motor's DIR and PWM
+        pins in a predictable pattern (for multimeter/probe validation) and can
+        verify the HAL encoder pins by looping HAL_CLK <-> HAL_CNT with a
+        jumper wire.
+
+config WALLTER_HAL_SIM
+    bool "Enable HAL encoder simulation"
+    default n
+    help
+        Generates simulated encoder (HAL_CLK/HAL_CNT) steps in software based on
+        the commanded motor speed/direction. This is useful for validating the
+        calibration menu flow and NVS save/load without motors connected.
+
+config WALLTER_HAL_SIM_PERIOD_MS
+    int "HAL simulation period (ms)"
+    depends on WALLTER_HAL_SIM
+    range 5 200
+    default 20
+
+config WALLTER_HAL_SIM_TICKS_PER_SEC
+    int "HAL simulation ticks/sec at full speed"
+    depends on WALLTER_HAL_SIM
+    range 10 10000
+    default 800
+
+config WALLTER_HAL_SIM_MAX_POS
+    int "HAL simulation max position (ticks)"
+    depends on WALLTER_HAL_SIM
+    range 1000 1000000
+    default 60000
+
+endmenu

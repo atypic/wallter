@@ -5,6 +5,16 @@
 
 static const char *TAG = "rgb_lcd_idf";
 
+static esp_err_t probe_i2c_address(i2c_port_t port, uint8_t addr, TickType_t timeout_ticks) {
+  i2c_cmd_handle_t cmd = i2c_cmd_link_create();
+  esp_err_t err = i2c_master_start(cmd);
+  if (err == ESP_OK) err = i2c_master_write_byte(cmd, (addr << 1) | I2C_MASTER_WRITE, true);
+  if (err == ESP_OK) err = i2c_master_stop(cmd);
+  if (err == ESP_OK) err = i2c_master_cmd_begin(port, cmd, timeout_ticks);
+  i2c_cmd_link_delete(cmd);
+  return err;
+}
+
 esp_err_t rgb_lcd_idf::init_i2c(i2c_port_t port, gpio_num_t sda, gpio_num_t scl, uint32_t clk_hz) {
   port_ = port;
   i2c_config_t cfg{};
@@ -19,11 +29,12 @@ esp_err_t rgb_lcd_idf::init_i2c(i2c_port_t port, gpio_num_t sda, gpio_num_t scl,
 #endif
   ESP_RETURN_ON_ERROR(i2c_param_config(port_, &cfg), TAG, "param_config");
   ESP_RETURN_ON_ERROR(i2c_driver_install(port_, cfg.mode, 0, 0, 0), TAG, "driver_install");
+  initialized_ = true;
   return ESP_OK;
 }
 
 esp_err_t rgb_lcd_idf::begin(uint8_t cols, uint8_t lines, uint8_t dotsize) {
-  initialized_ = true;
+  if (!initialized_) return ESP_ERR_INVALID_STATE;
 
   if (lines > 1) _displayfunction |= LCD_2LINE;
   _numlines = lines;
@@ -49,11 +60,13 @@ esp_err_t rgb_lcd_idf::begin(uint8_t cols, uint8_t lines, uint8_t dotsize) {
   _displaymode = LCD_ENTRYLEFT | LCD_ENTRYSHIFTDECREMENT;
   ESP_RETURN_ON_ERROR(command(LCD_ENTRYMODESET | _displaymode), TAG, "entrymode");
 
-  // Always use classic RGB address (0x62); skip probing
-  rgb_addr_ = RGB_ADDRESS;
+  // Probe optional RGB backlight chip (some boards omit it)
+  (void)probe_rgb_chip();
 
-  // Init backlight depending on chip variant
-  if (rgb_addr_ == RGB_ADDRESS_V5) {
+  // Init backlight depending on chip variant (if present)
+  if (rgb_addr_ == 0) {
+    ESP_LOGW(TAG, "RGB backlight chip not found; skipping backlight init");
+  } else if (rgb_addr_ == RGB_ADDRESS_V5) {
     // reset chip
     ESP_RETURN_ON_ERROR(setReg(0x00, 0x07), TAG, "v5 reset");
     vTaskDelay(pdMS_TO_TICKS(1)); // ~200us
@@ -145,7 +158,11 @@ esp_err_t rgb_lcd_idf::createChar(uint8_t location, const uint8_t charmap[8]) {
 // Mid-level
 esp_err_t rgb_lcd_idf::command(uint8_t value) {
   uint8_t dta[2] = {0x80, value};
-  return i2c_send_bytes(LCD_ADDRESS, dta, sizeof(dta));
+  esp_err_t err = i2c_send_bytes(LCD_ADDRESS, dta, sizeof(dta));
+  if (err != ESP_OK) {
+    ESP_LOGE(TAG, "I2C cmd 0x%02X -> %s (%d)", value, esp_err_to_name(err), (int)err);
+  }
+  return err;
 }
 esp_err_t rgb_lcd_idf::write(uint8_t value) {
   uint8_t dta[2] = {0x40, value};
@@ -163,10 +180,12 @@ esp_err_t rgb_lcd_idf::print(const char *str) {
 
 // RGB control
 esp_err_t rgb_lcd_idf::setReg(uint8_t reg, uint8_t dat) {
+  if (rgb_addr_ == 0) return ESP_OK;
   uint8_t dta[2] = {reg, dat};
   return i2c_send_bytes(rgb_addr_, dta, sizeof(dta));
 }
 esp_err_t rgb_lcd_idf::setRGB(uint8_t r, uint8_t g, uint8_t b) {
+  if (rgb_addr_ == 0) return ESP_OK;
   if (rgb_addr_ == RGB_ADDRESS_V5) {
     ESP_RETURN_ON_ERROR(setReg(0x06, r), TAG, "v5 R");
     ESP_RETURN_ON_ERROR(setReg(0x07, g), TAG, "v5 G");
@@ -218,7 +237,36 @@ esp_err_t rgb_lcd_idf::noBlinkLED() {
 // Low-level helpers
 esp_err_t rgb_lcd_idf::i2c_send_bytes(uint8_t addr, const uint8_t *data, size_t len) {
   if (!initialized_) return ESP_ERR_INVALID_STATE;
-  return i2c_master_write_to_device(port_, addr, data, len, pdMS_TO_TICKS(50));
+
+  // Be a bit forgiving: long wires / weak pullups can cause transient I2C errors.
+  constexpr int kMaxAttempts = 3;
+  for (int attempt = 1; attempt <= kMaxAttempts; ++attempt) {
+    esp_err_t err = i2c_master_write_to_device(port_, addr, data, len, pdMS_TO_TICKS(200));
+    if (err == ESP_OK) return ESP_OK;
+    if (attempt < kMaxAttempts) vTaskDelay(pdMS_TO_TICKS(10));
+    else return err;
+  }
+  return ESP_FAIL;
 }
 
-esp_err_t rgb_lcd_idf::probe_rgb_chip() { rgb_addr_ = RGB_ADDRESS; return ESP_OK; }
+esp_err_t rgb_lcd_idf::probe_rgb_chip() {
+  // Common addresses seen in Grove/clone RGB backlight controllers.
+  static constexpr uint8_t candidates[] = {
+    RGB_ADDRESS_V5,    // 0x30 v5 variant
+    RGB_ADDRESS,       // 0x62 classic
+    0x60, 0x61, 0x63,  // occasional clones around classic
+    0x6A               // rare clone variant
+  };
+
+  for (uint8_t addr : candidates) {
+    if (probe_i2c_address(port_, addr, pdMS_TO_TICKS(50)) == ESP_OK) {
+      rgb_addr_ = addr;
+      ESP_LOGI(TAG, "RGB backlight chip found at 0x%02X", rgb_addr_);
+      return ESP_OK;
+    }
+  }
+
+  rgb_addr_ = 0; // mark as absent
+  ESP_LOGW(TAG, "RGB backlight chip not found on I2C bus");
+  return ESP_ERR_NOT_FOUND;
+}

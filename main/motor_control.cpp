@@ -35,6 +35,13 @@ static int g_consecutive_stall[NUM_MOTORS] = {0};
 static int32_t g_last_steps_in[NUM_MOTORS] = {0};
 static int32_t g_last_steps_out[NUM_MOTORS] = {0};
 
+enum class HomePhase {
+    TO_STOP = 0,
+    TO_MIN = 1,
+};
+
+static HomePhase g_home_phase = HomePhase::TO_STOP;
+
 static inline uint64_t now_ms() {
     return (uint64_t)(esp_timer_get_time() / 1000ULL);
 }
@@ -133,6 +140,16 @@ void panicf(const char *fmt, ...) {
 void init(const Context &ctx) {
     g_ctx = ctx;
 
+    // Sanitize limits.
+    if (g_ctx.min_target_idx < 0) g_ctx.min_target_idx = 0;
+    if (g_ctx.max_target_idx <= 0 || g_ctx.max_target_idx >= g_ctx.max_angles) {
+        g_ctx.max_target_idx = g_ctx.max_angles - 1;
+    }
+    if (g_ctx.min_target_idx > g_ctx.max_target_idx) {
+        g_ctx.min_target_idx = 0;
+        g_ctx.max_target_idx = g_ctx.max_angles - 1;
+    }
+
     // Baselines for stall detection.
     for (int i = 0; i < g_ctx.num_motors; ++i) {
         g_consecutive_stall[i] = 0;
@@ -145,6 +162,8 @@ void init(const Context &ctx) {
     g_delta_acc_ms = 0;
     g_progress_start_ticks = g_ctx.motors[g_ctx.master_motor_index].getPosition();
     g_last_command_change_ms = now_ms();
+
+    g_home_phase = HomePhase::TO_STOP;
 }
 
 int command() {
@@ -168,6 +187,10 @@ void set_command(int cmd) {
     g_last_command_change_ms = now_ms();
 
     g_ctx.display->refresh();
+
+    if (cmd == wallter::CMD_HOME) {
+        g_home_phase = HomePhase::TO_STOP;
+    }
 
     if (cmd == wallter::CMD_EXTEND || cmd == wallter::CMD_RETRACT || cmd == wallter::CMD_HOME) {
         g_ctx.display->set_refresh_rate(1.0f);
@@ -219,15 +242,35 @@ static int32_t get_master_motor_speed() {
     int32_t current_pos = g_ctx.motors[g_ctx.master_motor_index].getPosition();
 
     if (g_current_cmd == wallter::CMD_HOME) {
-        if (motors_idle_for(2000)) {
-            reset_tick_counters(0, true);
-            reset_motor_positions();
-            g_ctx.display->set_view(LCD_TARGET_VIEW);
-            target_reached = true;
+        if (g_home_phase == HomePhase::TO_STOP) {
+            // First: retract until stall/idle indicates hard-stop.
+            if (motors_idle_for(2000)) {
+                reset_tick_counters(0, true);
+                reset_motor_positions();
+                // Optional second phase: extend to the configured usable-min offset.
+                if (g_ctx.home_offset_raw_ticks > 0) {
+                    g_home_phase = HomePhase::TO_MIN;
+                    // Start fresh progress tracking from the hard-stop.
+                    g_progress_start_ticks = 0;
+                } else {
+                    g_ctx.display->set_view(LCD_TARGET_VIEW);
+                    target_reached = true;
+                }
+            }
+        } else {
+            // Second: extend forward by home_offset_raw_ticks then stop.
+            if (current_pos >= (int32_t)g_ctx.home_offset_raw_ticks) {
+                reset_tick_counters(0, true);
+                reset_motor_positions();
+                g_ctx.display->set_view(LCD_TARGET_VIEW);
+                target_reached = true;
+            }
         }
     } else if (g_current_cmd == wallter::CMD_RETRACT) {
-        if (current_pos <= 1000) {
-            ESP_LOGI(TAG, "Auto-transition: retract pos=%ld -> CMD_HOME", (long)current_pos);
+        // Only do the near-home auto-transition when we're actually heading to home.
+        // Otherwise small-angle targets (low tick values) can incorrectly trigger homing.
+        if (*g_ctx.target_idx == 0 && current_pos <= 1000) {
+            ESP_LOGI(TAG, "Auto-transition: retract-to-home pos=%ld -> CMD_HOME", (long)current_pos);
             set_command(wallter::CMD_HOME);
         }
         if (current_pos <= (int32_t)target) {
@@ -247,8 +290,12 @@ static int32_t get_master_motor_speed() {
         g_accel_phase = false;
     }
 
-    if ((g_current_cmd == wallter::CMD_HOME) || (g_current_cmd == wallter::CMD_RETRACT)) {
+    if (g_current_cmd == wallter::CMD_RETRACT) {
         return -(int32_t)return_speed;
+    }
+    if (g_current_cmd == wallter::CMD_HOME) {
+        // During homing we may be retracting to stop or extending to min.
+        return (g_home_phase == HomePhase::TO_MIN) ? (int32_t)return_speed : -(int32_t)return_speed;
     }
     return (int32_t)return_speed;
 }
@@ -417,7 +464,12 @@ void handle_buttons(bool extend_event, bool retract_event) {
         return;
     }
 
-    int new_idx = compute_next_target_index(extend_event, retract_event, (int)*g_ctx.target_idx, g_ctx.max_angles);
+    int new_idx = compute_next_target_index(extend_event,
+                                            retract_event,
+                                            (int)*g_ctx.target_idx,
+                                            g_ctx.max_angles,
+                                            g_ctx.min_target_idx,
+                                            g_ctx.max_target_idx);
     if (new_idx == (int)*g_ctx.target_idx) {
         return;
     }
@@ -454,6 +506,23 @@ void handle_buttons(bool extend_event, bool retract_event) {
     }
 
     g_ctx.display->trigger_refresh();
+}
+
+void update_limits(int min_target_idx, int max_target_idx, uint32_t home_offset_raw_ticks) {
+    if (min_target_idx < 0) min_target_idx = 0;
+    if (max_target_idx < 0) max_target_idx = 0;
+    if (max_target_idx >= g_ctx.max_angles) max_target_idx = g_ctx.max_angles - 1;
+    if (min_target_idx > max_target_idx) {
+        min_target_idx = 0;
+        max_target_idx = g_ctx.max_angles - 1;
+    }
+
+    g_ctx.min_target_idx = min_target_idx;
+    g_ctx.max_target_idx = max_target_idx;
+    g_ctx.home_offset_raw_ticks = home_offset_raw_ticks;
+
+    if ((int)*g_ctx.target_idx < g_ctx.min_target_idx) *g_ctx.target_idx = (uint32_t)g_ctx.min_target_idx;
+    if ((int)*g_ctx.target_idx > g_ctx.max_target_idx) *g_ctx.target_idx = (uint32_t)g_ctx.max_target_idx;
 }
 
 } // namespace wallter::control

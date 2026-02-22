@@ -6,6 +6,30 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
+static esp_err_t probe_i2c_address(i2c_port_t port, uint8_t addr) {
+    i2c_cmd_handle_t cmd = i2c_cmd_link_create();
+    esp_err_t err = i2c_master_start(cmd);
+    if (err == ESP_OK) err = i2c_master_write_byte(cmd, (addr << 1) | I2C_MASTER_WRITE, true);
+    if (err == ESP_OK) err = i2c_master_stop(cmd);
+    if (err == ESP_OK) err = i2c_master_cmd_begin(port, cmd, pdMS_TO_TICKS(50));
+    i2c_cmd_link_delete(cmd);
+    return err;
+}
+
+static void scan_i2c_bus(i2c_port_t port) {
+    bool any = false;
+    for (uint8_t addr = 0x08; addr <= 0x77; ++addr) {
+        esp_err_t err = probe_i2c_address(port, addr);
+        if (err == ESP_OK) {
+            any = true;
+            ESP_LOGI("Display", "I2C found device at 0x%02X", addr);
+        }
+    }
+    if (!any) {
+        ESP_LOGW("Display", "I2C scan found no devices");
+    }
+}
+
 Display::Display()
     : lcd(),
     current_view(LCD_HOMING_VIEW),
@@ -18,20 +42,38 @@ Display::Display()
     pending_refresh(false) {}
 
 void Display::init(void) {
-    // Mirror the known-working demo exactly: pins, timing, params
-    lcd.setRGB(LCD_BACKLIGHT_R, LCD_BACKLIGHT_G, LCD_BACKLIGHT_B);
-    vTaskDelay(pdMS_TO_TICKS(1000));
-    const gpio_num_t SDA = GPIO_NUM_7;
-    const gpio_num_t SCL = GPIO_NUM_6;
-    if (lcd.init_i2c(I2C_NUM_0, SDA, SCL, 100000) != ESP_OK) {
+    const gpio_num_t sda = static_cast<gpio_num_t>(LCD_SDA_PIN);
+    const gpio_num_t scl = static_cast<gpio_num_t>(LCD_SCL_PIN);
+
+    if (lcd.init_i2c(I2C_NUM_0, sda, scl, LCD_I2C_CLOCK_HZ) != ESP_OK) {
         ESP_LOGE("Display", "I2C init failed");
         return;
     }
-    vTaskDelay(pdMS_TO_TICKS(1000));
+
+    vTaskDelay(pdMS_TO_TICKS(50));
     if (lcd.begin(16, 2, 0) != ESP_OK) {
         ESP_LOGE("Display", "LCD begin failed");
+
+        // Basic diagnostics: see which I2C addresses ACK on this bus.
+        // Expected for Grove/JHD1313M1-style RGB LCD: LCD 0x3E, RGB 0x62 (or 0x6A for v5).
+        for (uint8_t addr : {uint8_t(0x3E), uint8_t(0x3F), uint8_t(0x62), uint8_t(0x6A)}) {
+            esp_err_t perr = probe_i2c_address(I2C_NUM_0, addr);
+            ESP_LOGI("Display", "I2C probe 0x%02X -> %s", addr, esp_err_to_name(perr));
+        }
         return;
     }
+
+    // Useful for backlight troubleshooting even when LCD init succeeds.
+    for (uint8_t addr : {uint8_t(0x30), uint8_t(0x3E), uint8_t(0x62), uint8_t(0x6A)}) {
+        esp_err_t perr = probe_i2c_address(I2C_NUM_0, addr);
+        ESP_LOGI("Display", "I2C probe 0x%02X -> %s", addr, esp_err_to_name(perr));
+    }
+
+    // Full scan to discover unexpected backlight/controller addresses.
+    scan_i2c_bus(I2C_NUM_0);
+
+    // Backlight after LCD init (avoids errors if I2C wasn't ready)
+    lcd.setRGB(LCD_BACKLIGHT_R, LCD_BACKLIGHT_G, LCD_BACKLIGHT_B);
     lcd.clear();
 }
 
@@ -170,20 +212,23 @@ void Display::startup_animation() {
     uint8_t targetR = LCD_BACKLIGHT_R;
     uint8_t targetG = LCD_BACKLIGHT_G;
     uint8_t targetB = LCD_BACKLIGHT_B;
-    uint8_t curR = 0, curG = 0, curB = 0;
     lcd.setRGB(0, 0, 0);
 
     for (int f = 0; f < frames; ++f) {
         float p = (float)f / (float)frames;
+        uint8_t curR = 0, curG = 0, curB = 0;
         if (p < 0.25f) {
             curR = (uint8_t)(255.0f * (p / 0.25f));
             curG = 0;
             curB = 0;
         } else {
             float t = (p - 0.25f) / 0.75f;
-            curR = (uint8_t)(curR + (int)((targetR - curR) * t));
-            curG = (uint8_t)(curG + (int)((targetG - curG) * t));
-            curB = (uint8_t)(curB + (int)((targetB - curB) * t));
+            if (t < 0.0f) t = 0.0f;
+            if (t > 1.0f) t = 1.0f;
+            // Smoothly morph from pure red to target color.
+            curR = (uint8_t)(255.0f + (float)((int)targetR - 255) * t);
+            curG = (uint8_t)(0.0f + (float)targetG * t);
+            curB = (uint8_t)(0.0f + (float)targetB * t);
         }
         lcd.setRGB(curR, curG, curB);
 
@@ -233,4 +278,6 @@ void Display::startup_animation() {
         vTaskDelay(pdMS_TO_TICKS(frame_ms));
     }
     lcd.clear();
+    // Ensure we end on the configured steady backlight color.
+    lcd.setRGB(targetR, targetG, targetB);
 }

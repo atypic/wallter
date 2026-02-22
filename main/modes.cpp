@@ -5,6 +5,8 @@
 #include "calibration_store.hpp"
 #include "commands.hpp"
 
+#include "motor_control.hpp"
+
 #include "display.hpp"
 #include "motordriver.hpp"
 
@@ -74,10 +76,116 @@ BootMenuChoice run_boot_menu(Services &svc) {
 }
 
 void run_calibration_mode(Services &svc) {
-    // Start by homing fully ("board all the way back")
+    if (!svc.cal_meta || !svc.home_offset_raw_ticks) {
+        svc.panicf("NO META");
+    }
+
+    auto clamp_meta = [&]() {
+        int min_deg = (int)svc.cal_meta->min_angle_deg;
+        int max_deg = (int)svc.cal_meta->max_angle_deg;
+        if (min_deg < LOWEST_ANGLE) min_deg = LOWEST_ANGLE;
+        if (max_deg > HIGHEST_ANGLE) max_deg = HIGHEST_ANGLE;
+        if (((min_deg - LOWEST_ANGLE) % ANGLE_STEP) != 0) min_deg = LOWEST_ANGLE;
+        if (((max_deg - LOWEST_ANGLE) % ANGLE_STEP) != 0) max_deg = HIGHEST_ANGLE;
+        if (min_deg > max_deg) max_deg = min_deg;
+        svc.cal_meta->min_angle_deg = (uint8_t)min_deg;
+        svc.cal_meta->max_angle_deg = (uint8_t)max_deg;
+    };
+    clamp_meta();
+
+    // Start by homing. With a configured min-angle, CMD_HOME will end at that min.
     svc.run_homing_blocking(/*timeout_ms=*/45000);
 
     static constexpr uint32_t kAdjustStepTicks = 50;
+
+    enum class CalAction {
+        STORE = 0,
+        DISCARD = 1,
+        SET_MIN = 2,
+        SET_MAX = 3,
+    };
+
+    auto run_submenu = [&]() -> CalAction {
+        CalAction sel = CalAction::STORE;
+        bool prev_up = false;
+        bool prev_dn = false;
+        bool prev_both = false;
+
+        auto render = [&](CalAction a) {
+            char line1[17];
+            // Example: "Act m20 M60" (<= 11 chars)
+            snprintf(line1,
+                     sizeof(line1),
+                     "Act m%u M%u",
+                     (unsigned)svc.cal_meta->min_angle_deg,
+                     (unsigned)svc.cal_meta->max_angle_deg);
+            switch (a) {
+                case CalAction::STORE:
+                    svc.display->print(line1, ">Store");
+                    break;
+                case CalAction::DISCARD:
+                    svc.display->print(line1, ">Discard");
+                    break;
+                case CalAction::SET_MIN:
+                    svc.display->print(line1, ">Set Min");
+                    break;
+                case CalAction::SET_MAX:
+                    svc.display->print(line1, ">Set Max");
+                    break;
+            }
+        };
+
+        render(sel);
+
+        while (1) {
+            bool up = svc.read_extend_pressed();
+            bool dn = svc.read_retract_pressed();
+            bool both = up && dn;
+
+            if (!both) {
+                if (up && !prev_up) {
+                    sel = (sel == CalAction::SET_MAX) ? CalAction::STORE : (CalAction)((int)sel + 1);
+                    render(sel);
+                }
+                if (dn && !prev_dn) {
+                    sel = (sel == CalAction::STORE) ? CalAction::SET_MAX : (CalAction)((int)sel - 1);
+                    render(sel);
+                }
+            }
+
+            if (both && !prev_both) {
+                // Confirm selection; wait for release.
+                while (svc.read_extend_pressed() || svc.read_retract_pressed()) {
+                    vTaskDelay(pdMS_TO_TICKS(30));
+                }
+                return sel;
+            }
+
+            prev_up = up;
+            prev_dn = dn;
+            prev_both = both;
+            vTaskDelay(pdMS_TO_TICKS(40));
+        }
+    };
+
+    auto save_all_to_nvs = [&]() {
+        // Convert shifted ticks back to raw ticks for storage.
+        int min_idx = wallter::angle_to_index((int)svc.cal_meta->min_angle_deg);
+        if (min_idx < 0) min_idx = 0;
+        uint32_t offset = *svc.home_offset_raw_ticks;
+
+        uint32_t raw[wallter::kMaxAngles] = {0};
+        for (int i = 0; i < svc.max_angles; ++i) {
+            if (i < min_idx) {
+                raw[i] = 0;
+            } else {
+                raw[i] = svc.target_ticks[i] + offset;
+            }
+        }
+
+        (void)wallter::calibration::save_from_target_ticks(raw, svc.max_angles);
+        (void)wallter::calibration::save_meta(*svc.cal_meta);
+    };
 
     bool prev_up = false;
     bool prev_dn = false;
@@ -87,13 +195,18 @@ void run_calibration_mode(Services &svc) {
     int last_ui_angle = -1;
     uint64_t last_ui_ms = 0;
 
-    for (int angle = wallter::calibration::kFirstAngle; angle <= wallter::calibration::kLastAngle; angle += wallter::calibration::kStepAngle) {
+    int min_angle = (int)svc.cal_meta->min_angle_deg;
+    int max_angle = (int)svc.cal_meta->max_angle_deg;
+
+    for (int angle = min_angle; angle <= max_angle; angle += ANGLE_STEP) {
         int idx = wallter::angle_to_index(angle);
         if (idx < 0) {
             svc.panicf("BAD ANG %d", angle);
         }
 
         *svc.target_idx = (uint32_t)idx;
+
+        const uint32_t original_ticks = svc.target_ticks[idx];
 
         // Ensure we are stopped before starting adjustments for this angle
         svc.set_current_command(wallter::CMD_STOP);
@@ -112,15 +225,25 @@ void run_calibration_mode(Services &svc) {
 
             svc.motor_control_iteration();
 
-            // UI: "20: <hal cnt>"
+            // UI: "20: <ticks>" (mark min angle)
             char line1[17];
-            snprintf(line1, sizeof(line1), "%d: %lu", angle, (unsigned long)svc.target_ticks[*svc.target_idx]);
+            char line2[17];
+            snprintf(line2,
+                     sizeof(line2),
+                     "m%u M%u",
+                     (unsigned)svc.cal_meta->min_angle_deg,
+                     (unsigned)svc.cal_meta->max_angle_deg);
+            if (angle == (int)svc.cal_meta->min_angle_deg) {
+                snprintf(line1, sizeof(line1), "%dm:%lu", angle, (unsigned long)svc.target_ticks[*svc.target_idx]);
+            } else {
+                snprintf(line1, sizeof(line1), "%d:%lu", angle, (unsigned long)svc.target_ticks[*svc.target_idx]);
+            }
 
             // Avoid hammering I2C: only update when changed or periodically.
             uint64_t tnow = svc.now_ms();
             uint32_t cur_ticks = svc.target_ticks[*svc.target_idx];
             if (angle != last_ui_angle || cur_ticks != last_ui_ticks || (tnow - last_ui_ms) > 250ULL) {
-                svc.display->print(line1, "");
+                svc.display->print(line1, line2);
                 last_ui_angle = angle;
                 last_ui_ticks = cur_ticks;
                 last_ui_ms = tnow;
@@ -129,6 +252,102 @@ void run_calibration_mode(Services &svc) {
             bool up = svc.read_extend_pressed();
             bool dn = svc.read_retract_pressed();
             bool both = up && dn;
+
+            if (both && !prev_both) {
+                // Pause motion and open submenu.
+                svc.set_current_command(wallter::CMD_STOP);
+                svc.motor_control_iteration();
+                vTaskDelay(pdMS_TO_TICKS(80));
+
+                CalAction action = run_submenu();
+
+                if (action == CalAction::DISCARD) {
+                    svc.target_ticks[idx] = original_ticks;
+                    svc.display->print("discarded", "");
+                    uint64_t end = svc.now_ms() + 500ULL;
+                    while (svc.now_ms() < end) vTaskDelay(pdMS_TO_TICKS(30));
+                    break; // next angle
+                }
+
+                if (action == CalAction::SET_MAX) {
+                    svc.cal_meta->max_angle_deg = (uint8_t)angle;
+                    clamp_meta();
+                    // Update control limits immediately.
+                    int min_idx2 = wallter::angle_to_index((int)svc.cal_meta->min_angle_deg);
+                    int max_idx2 = wallter::angle_to_index((int)svc.cal_meta->max_angle_deg);
+                    if (min_idx2 < 0) min_idx2 = 0;
+                    if (max_idx2 < 0) max_idx2 = svc.max_angles - 1;
+                    wallter::control::update_limits(min_idx2, max_idx2, *svc.home_offset_raw_ticks);
+                    save_all_to_nvs();
+                    svc.display->print("max set", "stored");
+                    uint64_t end = svc.now_ms() + 650ULL;
+                    while (svc.now_ms() < end) vTaskDelay(pdMS_TO_TICKS(30));
+                    // End calibration early at max.
+                    goto calibration_done;
+                }
+
+                if (action == CalAction::SET_MIN) {
+                    // Recompute offsets/ticks when redefining min.
+                    int old_min_idx = wallter::angle_to_index((int)svc.cal_meta->min_angle_deg);
+                    if (old_min_idx < 0) old_min_idx = 0;
+                    uint32_t old_offset = *svc.home_offset_raw_ticks;
+
+                    uint32_t raw[wallter::kMaxAngles] = {0};
+                    for (int i = 0; i < svc.max_angles; ++i) {
+                        raw[i] = (i < old_min_idx) ? 0U : (svc.target_ticks[i] + old_offset);
+                    }
+
+                    svc.cal_meta->min_angle_deg = (uint8_t)angle;
+                    if ((int)svc.cal_meta->max_angle_deg < (int)svc.cal_meta->min_angle_deg) {
+                        svc.cal_meta->max_angle_deg = svc.cal_meta->min_angle_deg;
+                    }
+                    clamp_meta();
+
+                    int new_min_idx = wallter::angle_to_index((int)svc.cal_meta->min_angle_deg);
+                    int new_max_idx = wallter::angle_to_index((int)svc.cal_meta->max_angle_deg);
+                    if (new_min_idx < 0) new_min_idx = 0;
+                    if (new_max_idx < 0) new_max_idx = svc.max_angles - 1;
+
+                    uint32_t new_offset = raw[new_min_idx];
+                    *svc.home_offset_raw_ticks = new_offset;
+
+                    for (int i = 0; i < svc.max_angles; ++i) {
+                        if (i < new_min_idx) {
+                            svc.target_ticks[i] = 0;
+                        } else {
+                            uint32_t t = raw[i];
+                            svc.target_ticks[i] = (t >= new_offset) ? (t - new_offset) : 0;
+                        }
+                    }
+
+                    // Declare current mechanical position as logical home (0 ticks).
+                    for (int m = 0; m < svc.num_motors; ++m) {
+                        svc.motors[m].resetSteps(true);
+                        svc.motors[m].setPosition(0);
+                    }
+
+                    *svc.target_idx = (uint32_t)new_min_idx;
+                    wallter::control::update_limits(new_min_idx, new_max_idx, new_offset);
+                    save_all_to_nvs();
+                    svc.display->print("min set", "stored");
+                    uint64_t end = svc.now_ms() + 650ULL;
+                    while (svc.now_ms() < end) vTaskDelay(pdMS_TO_TICKS(30));
+                    // After changing min, restart loop bounds.
+                    min_angle = (int)svc.cal_meta->min_angle_deg;
+                    max_angle = (int)svc.cal_meta->max_angle_deg;
+                    angle = min_angle - ANGLE_STEP;
+                    break;
+                }
+
+                // STORE (default)
+                save_all_to_nvs();
+                svc.display->print("stored", "");
+                uint64_t end = svc.now_ms() + 600ULL;
+                while (svc.now_ms() < end) {
+                    vTaskDelay(pdMS_TO_TICKS(30));
+                }
+                break; // next angle
+            }
 
             if (!both) {
                 if (up && !prev_up) {
@@ -143,29 +362,14 @@ void run_calibration_mode(Services &svc) {
                 }
             }
 
-            if (both && !prev_both) {
-                // Store current calibration (angles 20..60)
-                (void)wallter::calibration::save_from_target_ticks(svc.target_ticks, svc.max_angles);
-
-                svc.display->print("stored", "");
-                uint64_t end = svc.now_ms() + 600ULL;
-                while (svc.now_ms() < end) {
-                    vTaskDelay(pdMS_TO_TICKS(30));
-                }
-
-                // Wait for button release so we don't double-trigger
-                while (svc.read_extend_pressed() || svc.read_retract_pressed()) {
-                    vTaskDelay(pdMS_TO_TICKS(30));
-                }
-                break; // next angle
-            }
-
             prev_up = up;
             prev_dn = dn;
             prev_both = both;
             vTaskDelay(pdMS_TO_TICKS(60));
         }
     }
+
+calibration_done:
 
     // Derive 15 degrees entry again, and return to home.
     {
