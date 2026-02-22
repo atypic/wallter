@@ -113,12 +113,15 @@ void run_calibration_mode(Services &svc) {
 
         auto render = [&](CalAction a) {
             char line1[17];
-            // Example: "Act m20 M60" (<= 11 chars)
+            const char deg = (char)0xDF; // HD44780 degree symbol
+            // Example: "Min20° Max60°"
             snprintf(line1,
                      sizeof(line1),
-                     "Act m%u M%u",
+                     "Min%u%c Max%u%c",
                      (unsigned)svc.cal_meta->min_angle_deg,
-                     (unsigned)svc.cal_meta->max_angle_deg);
+                     deg,
+                     (unsigned)svc.cal_meta->max_angle_deg,
+                     deg);
             switch (a) {
                 case CalAction::STORE:
                     svc.display->print(line1, ">Store");
@@ -195,10 +198,11 @@ void run_calibration_mode(Services &svc) {
     int last_ui_angle = -1;
     uint64_t last_ui_ms = 0;
 
-    int min_angle = (int)svc.cal_meta->min_angle_deg;
+    int configured_min_angle = (int)svc.cal_meta->min_angle_deg;
     int max_angle = (int)svc.cal_meta->max_angle_deg;
 
-    for (int angle = min_angle; angle <= max_angle; angle += ANGLE_STEP) {
+    // Always start at 10° in the UI. If the configured min is higher, early angles show SKIP.
+    for (int angle = LOWEST_ANGLE; angle <= max_angle; angle += ANGLE_STEP) {
         int idx = wallter::angle_to_index(angle);
         if (idx < 0) {
             svc.panicf("BAD ANG %d", angle);
@@ -212,31 +216,49 @@ void run_calibration_mode(Services &svc) {
         svc.set_current_command(wallter::CMD_STOP);
 
         while (1) {
-            // Drive motors toward current target ticks for this angle
+            // Drive motors toward current target ticks for this angle.
+            // Angles below configured min are mechanically skipped (no motion).
             int32_t pos = svc.motors[svc.master_motor_index].getPosition();
             uint32_t tgt = svc.target_ticks[*svc.target_idx];
-            if (pos < (int32_t)tgt) {
-                svc.set_current_command(wallter::CMD_EXTEND);
-            } else if (pos > (int32_t)tgt) {
-                svc.set_current_command(wallter::CMD_RETRACT);
-            } else {
+            if (angle < configured_min_angle) {
                 svc.set_current_command(wallter::CMD_STOP);
+            } else {
+                if (pos < (int32_t)tgt) {
+                    svc.set_current_command(wallter::CMD_EXTEND);
+                } else if (pos > (int32_t)tgt) {
+                    svc.set_current_command(wallter::CMD_RETRACT);
+                } else {
+                    svc.set_current_command(wallter::CMD_STOP);
+                }
             }
 
             svc.motor_control_iteration();
 
-            // UI: "20: <ticks>" (mark min angle)
+            // UI: show angle with degree symbol; mark configured min angle with '*'.
             char line1[17];
             char line2[17];
+            const char deg = (char)0xDF; // HD44780 degree symbol
             snprintf(line2,
                      sizeof(line2),
-                     "m%u M%u",
+                     "Min%u%c Max%u%c",
                      (unsigned)svc.cal_meta->min_angle_deg,
-                     (unsigned)svc.cal_meta->max_angle_deg);
-            if (angle == (int)svc.cal_meta->min_angle_deg) {
-                snprintf(line1, sizeof(line1), "%dm:%lu", angle, (unsigned long)svc.target_ticks[*svc.target_idx]);
+                     deg,
+                     (unsigned)svc.cal_meta->max_angle_deg,
+                     deg);
+
+            if (angle < configured_min_angle) {
+                unsigned shown_angle = (unsigned)angle;
+                if (shown_angle > 99U) shown_angle = 99U;
+                snprintf(line1, sizeof(line1), "%2u%c  SKIP", shown_angle, deg);
             } else {
-                snprintf(line1, sizeof(line1), "%d:%lu", angle, (unsigned long)svc.target_ticks[*svc.target_idx]);
+                char mark = (angle == configured_min_angle) ? '*' : ' ';
+                snprintf(line1,
+                         sizeof(line1),
+                         "%2d%c%c T%lu",
+                         angle,
+                         deg,
+                         mark,
+                         (unsigned long)svc.target_ticks[*svc.target_idx]);
             }
 
             // Avoid hammering I2C: only update when changed or periodically.
@@ -287,6 +309,12 @@ void run_calibration_mode(Services &svc) {
                 }
 
                 if (action == CalAction::SET_MIN) {
+                    if (angle < configured_min_angle) {
+                        svc.display->print("Can't set Min", "below current");
+                        uint64_t end = svc.now_ms() + 900ULL;
+                        while (svc.now_ms() < end) vTaskDelay(pdMS_TO_TICKS(30));
+                        break;
+                    }
                     // Recompute offsets/ticks when redefining min.
                     int old_min_idx = wallter::angle_to_index((int)svc.cal_meta->min_angle_deg);
                     if (old_min_idx < 0) old_min_idx = 0;
@@ -333,9 +361,9 @@ void run_calibration_mode(Services &svc) {
                     uint64_t end = svc.now_ms() + 650ULL;
                     while (svc.now_ms() < end) vTaskDelay(pdMS_TO_TICKS(30));
                     // After changing min, restart loop bounds.
-                    min_angle = (int)svc.cal_meta->min_angle_deg;
+                    configured_min_angle = (int)svc.cal_meta->min_angle_deg;
                     max_angle = (int)svc.cal_meta->max_angle_deg;
-                    angle = min_angle - ANGLE_STEP;
+                    angle = LOWEST_ANGLE - ANGLE_STEP;
                     break;
                 }
 
@@ -349,7 +377,7 @@ void run_calibration_mode(Services &svc) {
                 break; // next angle
             }
 
-            if (!both) {
+            if (!both && angle >= configured_min_angle) {
                 if (up && !prev_up) {
                     svc.target_ticks[*svc.target_idx] += kAdjustStepTicks;
                 }
