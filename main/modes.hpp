@@ -9,7 +9,7 @@ class MotorDriver;
 
 namespace wallter::modes {
 
-enum BootMenuChoice { MENU_CALIBRATE = 0, MENU_SELF_TEST = 1 };
+enum BootMenuChoice { MENU_CALIBRATE = 0, MENU_SELF_TEST = 1, MENU_JOG = 2 };
 
 struct Services {
     Display *display{};
@@ -46,5 +46,6 @@ struct Services {
 BootMenuChoice run_boot_menu(Services &svc);
 void run_calibration_mode(Services &svc);
 void run_self_test_sequence(Services &svc);
+void run_jog_mode(Services &svc);
 
 } // namespace wallter::modes

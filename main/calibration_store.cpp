@@ -19,12 +19,38 @@ static constexpr uint32_t kBlobMagic = 0x57414C54; // 'WALT'
 
 // Default table (index 0..10 corresponds to angles LOWEST_ANGLE..HIGHEST_ANGLE).
 // This preserves the previous firmware behavior when no calibration is stored.
-static const uint32_t kDefaultTargetTicks[] = {0, 3000, 6000, 9000, 12500, 16400, 20000, 24000, 29000, 33000, 37000};
+static const uint32_t kDefaultTargetTicks[] = {
+    // 10..70 degrees, 5-degree step (13 entries)
+    0,     // 10
+    3000,  // 15
+    6000,  // 20
+    9000,  // 25
+    12500, // 30
+    16400, // 35
+    20000, // 40
+    24000, // 45
+    29000, // 50
+    33000, // 55
+    37000, // 60
+    42000, // 65
+    47000  // 70
+};
+
+static constexpr int kV1FirstAngle = 20;
+static constexpr int kV1LastAngle  = 60;
+static constexpr int kV1StepAngle  = 5;
+static constexpr int kV1Count      = ((kV1LastAngle - kV1FirstAngle) / kV1StepAngle) + 1; // 9
 
 struct CalBlobV1 {
     uint32_t magic;
     uint32_t version;
-    uint32_t ticks[kCount];
+    uint32_t ticks[kV1Count];
+};
+
+struct CalBlobV2 {
+    uint32_t magic;
+    uint32_t version;
+    uint32_t ticks[wallter::kMaxAngles];
 };
 
 struct CalMetaBlobV1 {
@@ -60,17 +86,9 @@ static void apply_defaults(uint32_t *target_ticks, int target_len) {
 }
 
 static void derive_entries(uint32_t *target_ticks, int target_len) {
+    (void)target_ticks;
     (void)target_len;
-    // Derive 15° between 10° (0) and 20°.
-    int idx20 = wallter::angle_to_index(20);
-    int idx15 = wallter::angle_to_index(15);
-    if (idx20 >= 0 && idx15 >= 0) {
-        target_ticks[idx15] = target_ticks[idx20] / 2U;
-    }
-    // Ensure home is always zero.
-    if (target_len > 0) {
-        target_ticks[0] = 0;
-    }
+    // No derived entries in v2: each 5-degree angle is calibrated explicitly (or skipped).
 }
 
 static void log_key_ticks(const uint32_t *target_ticks, int target_len, const char *prefix) {
@@ -115,37 +133,80 @@ bool load_or_default(uint32_t *target_ticks, int target_len) {
         return false;
     }
 
-    CalBlobV1 blob = {};
-    size_t len = sizeof(blob);
-    err = nvs_get_blob(handle, kNvsKeyBlob, &blob, &len);
-    nvs_close(handle);
-
-    if (err != ESP_OK || len != sizeof(blob)) {
+    size_t len = 0;
+    err = nvs_get_blob(handle, kNvsKeyBlob, nullptr, &len);
+    if (err != ESP_OK || len < (sizeof(uint32_t) * 2)) {
+        nvs_close(handle);
         ESP_LOGI(TAG, "No calibration blob (%d, len=%u); using defaults", (int)err, (unsigned)len);
         derive_entries(target_ticks, target_len);
         return false;
     }
 
-    if (blob.magic != kBlobMagic || blob.version != 1U) {
-        ESP_LOGW(TAG, "Calibration blob invalid (magic=0x%08lx ver=%lu)",
-                 (unsigned long)blob.magic,
-                 (unsigned long)blob.version);
+    // Read into a buffer large enough for the latest blob.
+    uint8_t buf[sizeof(CalBlobV2)] = {0};
+    if (len > sizeof(buf)) {
+        nvs_close(handle);
+        ESP_LOGW(TAG, "Calibration blob too large (len=%u); using defaults", (unsigned)len);
+        derive_entries(target_ticks, target_len);
+        return false;
+    }
+    err = nvs_get_blob(handle, kNvsKeyBlob, buf, &len);
+    nvs_close(handle);
+    if (err != ESP_OK) {
+        ESP_LOGI(TAG, "Calibration blob read failed (%d); using defaults", (int)err);
         derive_entries(target_ticks, target_len);
         return false;
     }
 
-    for (int i = 0; i < kCount; ++i) {
-        int angle = kFirstAngle + i * kStepAngle;
-        int idx = wallter::angle_to_index(angle);
-        if (idx >= 0 && idx < target_len) {
-            target_ticks[idx] = blob.ticks[i];
-        }
+    const uint32_t magic = ((const uint32_t *)buf)[0];
+    const uint32_t ver = ((const uint32_t *)buf)[1];
+    if (magic != kBlobMagic) {
+        ESP_LOGW(TAG, "Calibration blob invalid magic (0x%08lx)", (unsigned long)magic);
+        derive_entries(target_ticks, target_len);
+        return false;
     }
 
+    if (ver == 2U) {
+        // V2 stores the full tick table. Be tolerant of length changes across firmware versions.
+        if (len < (sizeof(uint32_t) * 2U + sizeof(uint32_t))) {
+            ESP_LOGW(TAG, "Calibration v2 blob too small (len=%u); using defaults", (unsigned)len);
+            derive_entries(target_ticks, target_len);
+            return false;
+        }
+        size_t count = (len - sizeof(uint32_t) * 2U) / sizeof(uint32_t);
+        const uint32_t *ticks = (const uint32_t *)(buf + sizeof(uint32_t) * 2U);
+        size_t copy_n = count;
+        if (copy_n > (size_t)target_len) copy_n = (size_t)target_len;
+        for (size_t i = 0; i < copy_n; ++i) {
+            target_ticks[i] = ticks[i];
+        }
+        derive_entries(target_ticks, target_len);
+        ESP_LOGI(TAG, "Calibration loaded from NVS (v2)");
+        log_key_ticks(target_ticks, target_len, "Loaded");
+        return true;
+    }
+
+    if (ver == 1U && len == sizeof(CalBlobV1)) {
+        const CalBlobV1 *b1 = (const CalBlobV1 *)buf;
+        // Map legacy 20..60 slice into the current target table.
+        for (int i = 0; i < kV1Count; ++i) {
+            int angle = kV1FirstAngle + i * kV1StepAngle;
+            int idx = wallter::angle_to_index(angle);
+            if (idx >= 0 && idx < target_len) {
+                target_ticks[idx] = b1->ticks[i];
+            }
+        }
+        derive_entries(target_ticks, target_len);
+        ESP_LOGI(TAG, "Calibration loaded from NVS (v1)");
+        log_key_ticks(target_ticks, target_len, "Loaded");
+        return true;
+    }
+
+    ESP_LOGW(TAG, "Calibration blob unexpected (ver=%lu len=%u); using defaults", (unsigned long)ver, (unsigned)len);
     derive_entries(target_ticks, target_len);
-    ESP_LOGI(TAG, "Calibration loaded from NVS");
-    log_key_ticks(target_ticks, target_len, "Loaded");
-    return true;
+    return false;
+
+    // unreachable
 }
 
 esp_err_t save_from_target_ticks(const uint32_t *target_ticks, int target_len) {
@@ -153,14 +214,11 @@ esp_err_t save_from_target_ticks(const uint32_t *target_ticks, int target_len) {
         return ESP_ERR_INVALID_ARG;
     }
 
-    CalBlobV1 blob = {};
+    CalBlobV2 blob = {};
     blob.magic = kBlobMagic;
-    blob.version = 1U;
-
-    for (int i = 0; i < kCount; ++i) {
-        int angle = kFirstAngle + i * kStepAngle;
-        int idx = wallter::angle_to_index(angle);
-        blob.ticks[i] = (idx >= 0 && idx < target_len) ? target_ticks[idx] : 0;
+    blob.version = 2U;
+    for (int i = 0; i < wallter::kMaxAngles; ++i) {
+        blob.ticks[i] = (i >= 0 && i < target_len) ? target_ticks[i] : 0;
     }
 
     nvs_handle_t handle;

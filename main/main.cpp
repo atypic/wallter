@@ -87,6 +87,10 @@ static void load_calibration_all() {
     wallter::calibration::load_or_default(g_target_ticks, MAX_ANGLES);
     (void)wallter::calibration::load_meta_or_default(g_cal_meta);
     apply_calibration_meta_and_shift();
+
+    // Always start at the configured minimum angle on boot/reload.
+    // (Calibration mode may leave target_idx pointing at the last visited step.)
+    g_target_idx = (uint32_t)g_min_target_idx;
 }
 
 // Motor control state machine lives in wallter::control
@@ -131,8 +135,11 @@ extern "C" void app_main(void) {
         if (choice == wallter::modes::MENU_CALIBRATE) {
             display.print("Calibration", "Starting...");
             wallter::modes::run_calibration_mode(svc);
-        } else {
+        } else if (choice == wallter::modes::MENU_SELF_TEST) {
             wallter::modes::run_self_test_sequence(svc);
+        } else {
+            display.print("Jog mode", "Starting...");
+            wallter::modes::run_jog_mode(svc);
         }
 
         // Re-load calibration after a calibration run (ensures interpolation is applied consistently)

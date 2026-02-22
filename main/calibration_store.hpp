@@ -3,13 +3,15 @@
 #include <stdint.h>
 #include "esp_err.h"
 
+#include "angle_utils.hpp"
+
 namespace wallter::calibration {
 
-// Calibration sweep: angles 20..60 in 5 degree steps.
-static constexpr int kFirstAngle = 20;
-static constexpr int kLastAngle  = 60;
-static constexpr int kStepAngle  = 5;
-static constexpr int kCount      = ((kLastAngle - kFirstAngle) / kStepAngle) + 1; // 9
+// Calibration sweep: full angle table (LOWEST_ANGLE..HIGHEST_ANGLE) in ANGLE_STEP.
+static constexpr int kFirstAngle = LOWEST_ANGLE;
+static constexpr int kLastAngle  = HIGHEST_ANGLE;
+static constexpr int kStepAngle  = ANGLE_STEP;
+static constexpr int kCount      = wallter::kMaxAngles;
 
 // Initializes NVS (safe to call multiple times; ESP-IDF handles internally).
 esp_err_t init_nvs();

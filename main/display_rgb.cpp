@@ -78,22 +78,15 @@ void Display::init(void) {
 }
 
 void Display::print(const char *message, const char *line2) {
-    // Clear may NACK if bus is busy; retry briefly
-    esp_err_t err = lcd.clear();
-    if (err != ESP_OK) {
-        ESP_LOGW("Display", "lcd.clear failed (%d), retrying", (int)err);
-        vTaskDelay(pdMS_TO_TICKS(10));
-        err = lcd.clear();
-        if (err != ESP_OK) {
-            ESP_LOGW("Display", "lcd.clear second attempt failed (%d)", (int)err);
-        }
-    }
-    lcd.setCursor(0, 0);
-    // Ensure strings are limited to 16 characters
+    // Avoid lcd.clear() to prevent visible flicker; instead overwrite both 16-char lines.
+    // Pad with spaces so shorter strings fully replace previous content.
+    const char *m1 = message ? message : "";
+    const char *m2 = line2 ? line2 : "";
     char l1[17];
     char l2[17];
-    snprintf(l1, sizeof(l1), "%.*s", 16, message ? message : "");
-    snprintf(l2, sizeof(l2), "%.*s", 16, line2 ? line2 : "");
+    snprintf(l1, sizeof(l1), "%-16.16s", m1);
+    snprintf(l2, sizeof(l2), "%-16.16s", m2);
+    lcd.setCursor(0, 0);
     lcd.print(l1);
     lcd.setCursor(0, 1);
     lcd.print(l2);

@@ -25,7 +25,7 @@
 bool g_has_keypad = false;
 
 #define LOWEST_ANGLE 10
-#define HIGHEST_ANGLE 60
+#define HIGHEST_ANGLE 70
 #define ANGLE_STEP 5
 
 #define MASTER_MOTOR 0
