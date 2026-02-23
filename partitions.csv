@@ -1,0 +1,10 @@
+# ESP-IDF partition table for 2MB flash with dual OTA slots.
+# Each OTA slot is 0xE0000 (896 KB), enough for the current ~503 KB app
+# with room to grow.
+
+# Name,   Type, SubType, Offset,   Size,     Flags
+nvs,      data, nvs,     0x9000,   0x6000,
+otadata,  data, ota,     0xF000,   0x2000,
+phy_init, data, phy,     0x11000,  0x1000,
+ota_0,    app,  ota_0,   0x20000,  0xE0000,
+ota_1,    app,  ota_1,   0x100000, 0xE0000,

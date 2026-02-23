@@ -1,0 +1,50 @@
+name: build
+
+on:
+  push:
+    branches: ["main"]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    container: espressif/idf:v5.5.1
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Build (ESP32-S3)
+        shell: bash
+        run: |
+          . /opt/esp/entrypoint.sh
+          idf.py set-target esp32s3
+          idf.py build
+
+      - name: Generate SHA256
+        shell: bash
+        run: |
+          sha256sum build/wallter.bin > build/wallter.bin.sha256
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: wallter-esp32s3
+          path: |
+            build/wallter.bin
+            build/wallter.bin.sha256
+
+      - name: Upload to GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            build/wallter.bin
+            build/wallter.bin.sha256

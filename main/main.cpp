@@ -14,6 +14,7 @@
 #include "display.hpp"
 #include "motordriver.hpp"
 #include "factory_test.hpp"
+#include "ble_ota.hpp"
 
 static const char *TAG = "main";
 
@@ -238,6 +239,9 @@ static void setup() {
     display.update_target_view(initial_angle, 0);
     display.update_homing_view();
     display.set_view(LCD_HOMING_VIEW);
+
+    // BLE OTA service (runs in background tasks when enabled).
+    wallter::ble_ota::init();
 }
 
 // Replicate Arduino handle_buttons() logic without blocking loops
