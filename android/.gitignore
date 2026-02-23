@@ -1,0 +1,19 @@
+.gradle/
+.idea/
+local.properties
+*.iml
+
+# Build outputs
+/build/
+/app/build/
+
+# Android Studio / IntelliJ
+/out/
+/.kotlin/
+
+# Native build (if ever used)
+.cxx/
+.externalNativeBuild/
+
+# Misc
+captures/

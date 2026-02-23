@@ -22,4 +22,8 @@ bool read_retract_pressed();
 bool boot_menu_requested();
 void clear_boot_menu_requested();
 
+// Boot-time request to skip the power-on self-test (latched during init).
+bool skip_self_test_requested();
+void clear_skip_self_test_requested();
+
 } // namespace wallter::inputs

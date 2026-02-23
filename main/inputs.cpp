@@ -27,6 +27,7 @@ static esp_timer_handle_t g_hal_sim_timer = nullptr;
 static volatile bool g_extend_event = false;
 static volatile bool g_retract_event = false;
 static bool g_boot_menu_requested = false;
+static bool g_skip_self_test_requested = false;
 
 // Software edge filter for HAL clocks (aggressive debounce)
 static uint64_t g_last_clk_us[NUM_MOTORS] = {0};
@@ -205,6 +206,7 @@ void init(MotorDriver *motors, int num_motors) {
     }
     if (gpio_get_level((gpio_num_t)BUTTON_RETRACT_PIN) == 0) {
         g_retract_event = true;
+        g_skip_self_test_requested = true;
     }
 }
 
@@ -236,6 +238,14 @@ bool boot_menu_requested() {
 
 void clear_boot_menu_requested() {
     g_boot_menu_requested = false;
+}
+
+bool skip_self_test_requested() {
+    return g_skip_self_test_requested;
+}
+
+void clear_skip_self_test_requested() {
+    g_skip_self_test_requested = false;
 }
 
 } // namespace wallter::inputs

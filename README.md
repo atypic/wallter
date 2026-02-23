@@ -150,3 +150,25 @@ State values:
 ### Security
 
 The current OTA service does not require pairing/bonding. Treat the BLE OTA channel as trusted physical-proximity access.
+
+## BLE Control GATT Protocol
+
+In addition to OTA, the firmware exposes a small control service intended to mimic the device's physical buttons (angle up/down).
+
+### Service & Characteristic
+
+- Control Service UUID: `7d5a9b9a-2a4d-2f4d-9e2c-8d7c34020500`
+- Buttons characteristic (Write): `7d5a9b9a-2a4d-2f4d-9e2c-8d7c34020600`
+
+### Buttons Characteristic
+
+Write a 1-byte bitmask representing one or more button-like events:
+
+- `0x01` = Extend (angle up)
+- `0x02` = Retract (angle down)
+- `0x04` = Stop
+- `0x08` = Home
+
+Notes:
+- Events are latched until the main loop consumes them.
+- The app can send repeated Extend/Retract events to step through target angles.

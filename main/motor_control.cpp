@@ -459,7 +459,6 @@ void error_check_motor_positions() {
 }
 
 void handle_buttons(bool extend_event, bool retract_event) {
-    // Exit early during homing
     if (g_current_cmd == wallter::CMD_HOME) {
         return;
     }

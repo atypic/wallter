@@ -2,8 +2,11 @@
 
 #include "ota_update.hpp"
 
+#include "esp_err.h"
 #include "esp_log.h"
 #include "esp_system.h"
+
+#include "nvs_flash.h"
 
 #include "esp_bt.h"
 
@@ -45,6 +48,19 @@ static const ble_uuid128_t kStatusUuid = BLE_UUID128_INIT(
     0x9a, 0x9b, 0x5a, 0x7d, 0x4d, 0x2a, 0x4d, 0x2f,
     0x9e, 0x2c, 0x8d, 0x7c, 0x34, 0x02, 0x04, 0x00);
 
+// 128-bit UUIDs for Wallter control service (button-like commands).
+static const ble_uuid128_t kCtlSvcUuid = BLE_UUID128_INIT(
+    0x9a, 0x9b, 0x5a, 0x7d, 0x4d, 0x2a, 0x4d, 0x2f,
+    0x9e, 0x2c, 0x8d, 0x7c, 0x34, 0x02, 0x05, 0x00);
+
+static const ble_uuid128_t kButtonsUuid = BLE_UUID128_INIT(
+    0x9a, 0x9b, 0x5a, 0x7d, 0x4d, 0x2a, 0x4d, 0x2f,
+    0x9e, 0x2c, 0x8d, 0x7c, 0x34, 0x02, 0x06, 0x00);
+
+static const ble_uuid128_t kAngleUuid = BLE_UUID128_INIT(
+    0x9a, 0x9b, 0x5a, 0x7d, 0x4d, 0x2a, 0x4d, 0x2f,
+    0x9e, 0x2c, 0x8d, 0x7c, 0x34, 0x02, 0x07, 0x00);
+
 enum : uint8_t {
     kOpBegin = 0x01,
     kOpData = 0x02,
@@ -55,6 +71,13 @@ enum : uint8_t {
 
 enum : uint8_t {
     kFlagHasSha256 = 0x01,
+};
+
+enum : uint8_t {
+    kBtnExtend = 0x01,
+    kBtnRetract = 0x02,
+    kBtnStop = 0x04,
+    kBtnHome = 0x08,
 };
 
 enum class State : uint8_t {
@@ -80,6 +103,37 @@ static uint8_t g_expected_sha256[32] = {0};
 
 static uint16_t g_conn_handle = BLE_HS_CONN_HANDLE_NONE;
 static uint16_t g_status_val_handle = 0;
+static uint16_t g_angle_val_handle = 0;
+
+static volatile uint8_t g_btn_events = 0;
+
+// Angle is stored as raw float32 bits to avoid tearing.
+static uint32_t g_angle_bits = 0;
+
+static uint32_t angle_bits_get() {
+    return __atomic_load_n(&g_angle_bits, __ATOMIC_ACQUIRE);
+}
+
+static void angle_bits_set(uint32_t bits) {
+    __atomic_store_n(&g_angle_bits, bits, __ATOMIC_RELEASE);
+}
+
+void set_current_angle_deg(float angle_deg) {
+    uint32_t bits = 0;
+    static_assert(sizeof(bits) == sizeof(angle_deg));
+    memcpy(&bits, &angle_deg, sizeof(bits));
+    angle_bits_set(bits);
+}
+
+ButtonEvents poll_button_events() {
+    uint8_t bits = __atomic_exchange_n(&g_btn_events, 0, __ATOMIC_ACQ_REL);
+    return ButtonEvents{
+        .extend = (bits & kBtnExtend) != 0,
+        .retract = (bits & kBtnRetract) != 0,
+        .stop = (bits & kBtnStop) != 0,
+        .home = (bits & kBtnHome) != 0,
+    };
+}
 
 static uint32_t read_u32_le(const uint8_t *p) {
     return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
@@ -260,6 +314,35 @@ static int gatt_access_status(uint16_t /*conn_handle*/, uint16_t /*attr_handle*/
     return (rc == 0) ? 0 : BLE_ATT_ERR_INSUFFICIENT_RES;
 }
 
+static int gatt_access_buttons(uint16_t /*conn_handle*/, uint16_t /*attr_handle*/,
+                               struct ble_gatt_access_ctxt *ctxt, void * /*arg*/) {
+    // Buttons characteristic: one-byte bitmask of button-like events.
+    // 0x01=extend, 0x02=retract, 0x04=stop, 0x08=home
+    uint8_t b = 0;
+    uint16_t copied = 0;
+    int rc = ble_hs_mbuf_to_flat(ctxt->om, &b, sizeof(b), &copied);
+    if (rc != 0) {
+        return BLE_ATT_ERR_UNLIKELY;
+    }
+    if (copied < 1) {
+        return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
+    }
+
+    uint8_t masked = (uint8_t)(b & (kBtnExtend | kBtnRetract | kBtnStop | kBtnHome));
+    if (masked != 0) {
+        (void)__atomic_fetch_or(&g_btn_events, masked, __ATOMIC_RELEASE);
+    }
+    return 0;
+}
+
+static int gatt_access_angle(uint16_t /*conn_handle*/, uint16_t /*attr_handle*/,
+                             struct ble_gatt_access_ctxt *ctxt, void * /*arg*/) {
+    // Read-only float32 little-endian.
+    uint32_t bits = angle_bits_get();
+    int rc = os_mbuf_append(ctxt->om, &bits, sizeof(bits));
+    return (rc == 0) ? 0 : BLE_ATT_ERR_INSUFFICIENT_RES;
+}
+
 static const struct ble_gatt_svc_def gatt_svcs[] = {
     {
         .type = BLE_GATT_SVC_TYPE_PRIMARY,
@@ -294,6 +377,43 @@ static const struct ble_gatt_svc_def gatt_svcs[] = {
                 .flags = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_NOTIFY,
                 .min_key_size = 0,
                 .val_handle = &g_status_val_handle,
+                .cpfd = nullptr,
+            },
+            {
+                .uuid = nullptr,
+                .access_cb = nullptr,
+                .arg = nullptr,
+                .descriptors = nullptr,
+                .flags = 0,
+                .min_key_size = 0,
+                .val_handle = nullptr,
+                .cpfd = nullptr,
+            },
+        },
+    },
+    {
+        .type = BLE_GATT_SVC_TYPE_PRIMARY,
+        .uuid = &kCtlSvcUuid.u,
+        .includes = nullptr,
+        .characteristics = (struct ble_gatt_chr_def[]){
+            {
+                .uuid = &kButtonsUuid.u,
+                .access_cb = gatt_access_buttons,
+                .arg = nullptr,
+                .descriptors = nullptr,
+                .flags = BLE_GATT_CHR_F_WRITE,
+                .min_key_size = 0,
+                .val_handle = nullptr,
+                .cpfd = nullptr,
+            },
+            {
+                .uuid = &kAngleUuid.u,
+                .access_cb = gatt_access_angle,
+                .arg = nullptr,
+                .descriptors = nullptr,
+                .flags = BLE_GATT_CHR_F_READ,
+                .min_key_size = 0,
+                .val_handle = &g_angle_val_handle,
                 .cpfd = nullptr,
             },
             {
@@ -345,6 +465,14 @@ static void advertise() {
     struct ble_hs_adv_fields fields;
     memset(&fields, 0, sizeof(fields));
     fields.flags = BLE_HS_ADV_F_DISC_GEN | BLE_HS_ADV_F_BREDR_UNSUP;
+
+    // Advertise the service UUIDs so clients can filter reliably.
+    static const ble_uuid128_t adv_uuids[] = {
+        kSvcUuid,
+    };
+    fields.uuids128 = adv_uuids;
+    fields.num_uuids128 = sizeof(adv_uuids) / sizeof(adv_uuids[0]);
+    fields.uuids128_is_complete = 1;
 
     const char *name = ble_svc_gap_device_name();
     fields.name = (const uint8_t *)name;
@@ -411,39 +539,42 @@ void init() {
     if (started) {
         return;
     }
-    started = true;
 
     ESP_LOGI(TAG, "init");
 
-    // Initialize controller + VHCI (NimBLE HCI transport) + NimBLE host.
-    (void)esp_bt_controller_mem_release(ESP_BT_MODE_CLASSIC_BT);
-
-    esp_bt_controller_config_t bt_cfg = BT_CONTROLLER_INIT_CONFIG_DEFAULT();
-    esp_err_t err = esp_bt_controller_init(&bt_cfg);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "esp_bt_controller_init failed: %d", (int)err);
+    // ESP-IDF NimBLE examples initialize NVS before bringing up the controller.
+    // (The controller uses NVS for calibration data.)
+    esp_err_t ret = nvs_flash_init();
+    if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+        esp_err_t erase_ret = nvs_flash_erase();
+        if (erase_ret != ESP_OK) {
+            ESP_LOGE(TAG, "nvs_flash_erase failed: %s", esp_err_to_name(erase_ret));
+            return;
+        }
+        ret = nvs_flash_init();
+    }
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "nvs_flash_init failed: %s", esp_err_to_name(ret));
         return;
     }
 
-    err = esp_bt_controller_enable(ESP_BT_MODE_BLE);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "esp_bt_controller_enable failed: %d", (int)err);
+    ret = nimble_port_init();
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "nimble_port_init failed: %s", esp_err_to_name(ret));
         return;
     }
 
-    err = esp_nimble_hci_init();
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "esp_nimble_hci_init failed: %d", (int)err);
-        return;
-    }
-
-    nimble_port_init();
+    int rc = 0;
 
     // Basic GAP/GATT.
     ble_svc_gap_init();
     ble_svc_gatt_init();
 
-    ble_svc_gap_device_name_set("wallter");
+    rc = ble_svc_gap_device_name_set("wallter");
+    if (rc != 0) {
+        ESP_LOGE(TAG, "ble_svc_gap_device_name_set failed: %d", rc);
+        return;
+    }
 
     ble_hs_cfg.reset_cb = on_reset;
     ble_hs_cfg.sync_cb = on_sync;
@@ -457,7 +588,7 @@ void init() {
     // Prefer a larger MTU when the peer supports it.
     (void)ble_att_set_preferred_mtu(247);
 
-    int rc = ble_gatts_count_cfg(gatt_svcs);
+    rc = ble_gatts_count_cfg(gatt_svcs);
     if (rc != 0) {
         ESP_LOGE(TAG, "ble_gatts_count_cfg failed: %d", rc);
         return;
@@ -472,6 +603,8 @@ void init() {
     status_set(State::Idle, 0);
 
     nimble_port_freertos_init(host_task);
+
+    started = true;
 }
 
 } // namespace wallter::ble_ota

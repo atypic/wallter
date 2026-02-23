@@ -1,0 +1,6 @@
+#!/usr/bin/env sh
+
+# Note: This repo does not vendor Gradle wrapper binaries.
+# Use Android Studio's Gradle integration, or install Gradle locally.
+
+exec gradle "$@"

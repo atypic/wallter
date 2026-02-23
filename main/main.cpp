@@ -127,7 +127,7 @@ extern "C" void app_main(void) {
 
     // Boot menu: hold EXTEND while starting (latched during setup after GPIO config)
     bool boot_extend = wallter::inputs::boot_menu_requested();
-    bool boot_retract = wallter::inputs::read_retract_pressed();
+    bool boot_retract = wallter::inputs::skip_self_test_requested() || wallter::inputs::read_retract_pressed();
     if (boot_extend) {
         // Clear any latched interrupt flags before entering menu.
         wallter::inputs::clear_button_events();
@@ -148,9 +148,17 @@ extern "C" void app_main(void) {
         wallter::control::update_limits(g_min_target_idx, g_max_target_idx, g_home_offset_raw_ticks);
         wallter::inputs::clear_button_events();
         wallter::inputs::clear_boot_menu_requested();
+        wallter::inputs::clear_skip_self_test_requested();
     } else {
-        (void)boot_retract;
-        ESP_LOGI(TAG, "Normal boot: skipping self-test (use boot menu)");
+        if (boot_retract) {
+            ESP_LOGI(TAG, "Normal boot: skipping self-test (retract held at boot)");
+        } else {
+            ESP_LOGI(TAG, "Normal boot: running self-test (hold retract at boot to skip)");
+            wallter::modes::run_self_test_sequence(svc);
+        }
+
+        wallter::inputs::clear_button_events();
+        wallter::inputs::clear_skip_self_test_requested();
     }
 
     // Self testing done or skipped, let's go home.
@@ -179,6 +187,7 @@ extern "C" void app_main(void) {
         uint8_t pct = wallter::control::compute_progress_percent(pos, start_pos, (int32_t)target_ticks);
         float tgt_angle = (g_target_idx == 0) ? LOWEST_ANGLE : (g_target_idx * ANGLE_STEP + LOWEST_ANGLE);
         display.update_target_view(tgt_angle, pct);
+        wallter::ble_ota::set_current_angle_deg(tgt_angle);
         wallter::control::error_check_motor_positions();
         display.refresh();
         vTaskDelay(pdMS_TO_TICKS(200));
@@ -247,5 +256,14 @@ static void setup() {
 // Replicate Arduino handle_buttons() logic without blocking loops
 static void handle_buttons() {
     auto e = wallter::inputs::poll_button_events();
-    wallter::control::handle_buttons(e.extend, e.retract);
+
+    auto ble = wallter::ble_ota::poll_button_events();
+    if (ble.stop) {
+        wallter::control::set_command(wallter::CMD_STOP);
+    }
+    if (ble.home) {
+        wallter::control::set_command(wallter::CMD_HOME);
+    }
+
+    wallter::control::handle_buttons(e.extend || ble.extend, e.retract || ble.retract);
 }

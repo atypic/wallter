@@ -13,3 +13,8 @@ managed_components/
 
 # Local backups
 espidf_lcd_backup/
+
+# Android app (keep sources, ignore local state)
+android/.gradle/
+android/.idea/
+android/local.properties
