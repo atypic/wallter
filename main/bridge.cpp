@@ -1,17 +1,19 @@
 #include "bridge.hpp"
+
+#include "app_config.hpp"
 #include "display.hpp"
 #include "motordriver.hpp"
 #include "boards.h"
 
 static Display g_display;
 static MotorDriver motors[NUM_MOTORS] = {
-    MotorDriver(HAL_PWM[0], HAL_DIR[0]),
-    MotorDriver(HAL_PWM[1], HAL_DIR[1])
+    MotorDriver(HAL_PWM[0], HAL_DIR[0], LEDC_CHANNEL_0, MOTOR_OUTPUT_INVERT),
+    MotorDriver(HAL_PWM[1], HAL_DIR[1], LEDC_CHANNEL_1, MOTOR_OUTPUT_INVERT)
 #if NUM_MOTORS > 2
-    , MotorDriver(HAL_PWM[2], HAL_DIR[2])
+    , MotorDriver(HAL_PWM[2], HAL_DIR[2], LEDC_CHANNEL_2, MOTOR_OUTPUT_INVERT)
 #endif
 #if NUM_MOTORS > 3
-    , MotorDriver(HAL_PWM[3], HAL_DIR[3])
+    , MotorDriver(HAL_PWM[3], HAL_DIR[3], LEDC_CHANNEL_3, MOTOR_OUTPUT_INVERT)
 #endif
 };
 

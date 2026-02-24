@@ -17,23 +17,28 @@ static constexpr const char *kNvsKeyBlob   = "cal_ticks_v1";
 static constexpr const char *kNvsKeyMeta   = "cal_meta_v1";
 static constexpr uint32_t kBlobMagic = 0x57414C54; // 'WALT'
 
-// Default table (index 0..10 corresponds to angles LOWEST_ANGLE..HIGHEST_ANGLE).
-// This preserves the previous firmware behavior when no calibration is stored.
-static const uint32_t kDefaultTargetTicks[] = {
-    // 10..70 degrees, 5-degree step (13 entries)
-    0,     // 10
-    3000,  // 15
-    6000,  // 20
-    9000,  // 25
-    12500, // 30
-    16400, // 35
-    20000, // 40
-    24000, // 45
-    29000, // 50
-    33000, // 55
-    37000, // 60
-    42000, // 65
-    47000  // 70
+struct DefaultTickEntry {
+    int angle_deg;
+    uint32_t ticks;
+};
+
+// Default table in absolute angles (degrees). This preserves the previous firmware
+// behavior when no calibration is stored, while remaining correct even if the
+// build's LOWEST_ANGLE changes.
+static constexpr DefaultTickEntry kDefaultTargetTicks[] = {
+    {10, 0},
+    {15, 3000},
+    {20, 6000},
+    {25, 9000},
+    {30, 12500},
+    {35, 16400},
+    {40, 20000},
+    {45, 24000},
+    {50, 29000},
+    {55, 33000},
+    {60, 37000},
+    {65, 42000},
+    {70, 47000},
 };
 
 static constexpr int kV1FirstAngle = 20;
@@ -73,15 +78,32 @@ static bool is_valid_angle_setting(int angle_deg) {
 }
 
 static void apply_defaults(uint32_t *target_ticks, int target_len) {
-    // If the build's angle table changes, fall back to best-effort copy.
-    int n = target_len;
-    int d = (int)(sizeof(kDefaultTargetTicks) / sizeof(kDefaultTargetTicks[0]));
-    int copy_n = (n < d) ? n : d;
-    for (int i = 0; i < copy_n; ++i) {
-        target_ticks[i] = kDefaultTargetTicks[i];
+    if (!target_ticks || target_len <= 0) {
+        return;
     }
-    for (int i = copy_n; i < n; ++i) {
+
+    // Start from 0s, then fill any entries that are valid for this build.
+    for (int i = 0; i < target_len; ++i) {
         target_ticks[i] = 0;
+    }
+
+    for (const auto &e : kDefaultTargetTicks) {
+        int idx = wallter::angle_to_index(e.angle_deg);
+        if (idx >= 0 && idx < target_len) {
+            target_ticks[idx] = e.ticks;
+        }
+    }
+
+    // Clamp default usable table to the board's configured default calibration range.
+    // (This keeps "reset calibration" behavior consistent with DEFAULT_CAL_MIN/MAX.)
+    int min_idx = wallter::angle_to_index(DEFAULT_CAL_MIN_ANGLE);
+    int max_idx = wallter::angle_to_index(DEFAULT_CAL_MAX_ANGLE);
+    if (min_idx >= 0 && max_idx >= 0 && min_idx <= max_idx) {
+        for (int i = 0; i < target_len; ++i) {
+            if (i < min_idx || i > max_idx) {
+                target_ticks[i] = 0;
+            }
+        }
     }
 }
 
@@ -244,8 +266,8 @@ esp_err_t save_from_target_ticks(const uint32_t *target_ticks, int target_len) {
 }
 
 bool load_meta_or_default(CalMeta &out) {
-    out.min_angle_deg = (uint8_t)LOWEST_ANGLE;
-    out.max_angle_deg = (uint8_t)HIGHEST_ANGLE;
+    out.min_angle_deg = (uint8_t)DEFAULT_CAL_MIN_ANGLE;
+    out.max_angle_deg = (uint8_t)DEFAULT_CAL_MAX_ANGLE;
 
     nvs_handle_t handle;
     esp_err_t err = nvs_open(kNvsNamespace, NVS_READONLY, &handle);
@@ -268,8 +290,8 @@ bool load_meta_or_default(CalMeta &out) {
     int max_deg = (int)blob.max_angle_deg;
     if (!is_valid_angle_setting(min_deg) || !is_valid_angle_setting(max_deg) || min_deg > max_deg) {
         ESP_LOGW(TAG, "Calibration meta invalid (min=%d max=%d); using defaults", min_deg, max_deg);
-        out.min_angle_deg = (uint8_t)LOWEST_ANGLE;
-        out.max_angle_deg = (uint8_t)HIGHEST_ANGLE;
+        out.min_angle_deg = (uint8_t)DEFAULT_CAL_MIN_ANGLE;
+        out.max_angle_deg = (uint8_t)DEFAULT_CAL_MAX_ANGLE;
         return false;
     }
 
@@ -311,6 +333,35 @@ esp_err_t save_meta(const CalMeta &meta) {
         ESP_LOGI(TAG, "Calibration meta saved: min=%u max=%u", (unsigned)meta.min_angle_deg, (unsigned)meta.max_angle_deg);
     }
     return err;
+}
+
+esp_err_t erase_calibration() {
+    nvs_handle_t handle;
+    esp_err_t err = nvs_open(kNvsNamespace, NVS_READWRITE, &handle);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "NVS open failed for erase: %d", (int)err);
+        return err;
+    }
+
+    esp_err_t e1 = nvs_erase_key(handle, kNvsKeyBlob);
+    if (e1 != ESP_OK && e1 != ESP_ERR_NVS_NOT_FOUND) {
+        ESP_LOGW(TAG, "NVS erase key failed (%s): %d", kNvsKeyBlob, (int)e1);
+    }
+    esp_err_t e2 = nvs_erase_key(handle, kNvsKeyMeta);
+    if (e2 != ESP_OK && e2 != ESP_ERR_NVS_NOT_FOUND) {
+        ESP_LOGW(TAG, "NVS erase key failed (%s): %d", kNvsKeyMeta, (int)e2);
+    }
+
+    err = nvs_commit(handle);
+    nvs_close(handle);
+
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "NVS commit failed for erase: %d", (int)err);
+        return err;
+    }
+
+    ESP_LOGW(TAG, "Calibration erased (keys: %s, %s)", kNvsKeyBlob, kNvsKeyMeta);
+    return ESP_OK;
 }
 
 } // namespace wallter::calibration

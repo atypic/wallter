@@ -11,7 +11,10 @@ enum MotorDirection { DIR_STOP = 0, DIR_EXTEND = 1, DIR_RETRACT = -1 };
 class MotorDriver {
   public:
     // Construct with Cytron PWM/DIR pins
-    MotorDriver(uint8_t pwm_pin, uint8_t dir_pin);
+                MotorDriver(uint8_t pwm_pin,
+                                        uint8_t dir_pin,
+                                        ledc_channel_t pwm_channel = LEDC_CHANNEL_0,
+                                        bool invert_output = false);
 
     void init();
     void setSpeed(int32_t speed);  // [-MAXSPEED, MAXSPEED]
@@ -72,8 +75,10 @@ class MotorDriver {
     uint8_t pwm_pin;
     uint8_t dir_pin;
 
-    int32_t last_speed;
-    MotorDirection last_dir;
+        bool invert_output_;
+
+    volatile int32_t last_speed;
+    volatile MotorDirection last_dir;
 
     uint32_t last_check_ms;
     uint32_t last_steps_in;

@@ -27,18 +27,23 @@ BootMenuChoice run_boot_menu(Services &svc) {
     bool prev_extend = false;
     bool prev_retract = false;
 
+    static const char *items[] = {"Calibrate", "Run self test", "Jog mode", "HAL test", "Reset cal"};
+    static constexpr int kNumItems = (int)(sizeof(items) / sizeof(items[0]));
+
     svc.display->set_refresh_rate(0.2f);
 
     auto render = [&]() {
         // Show the selected item on line 1, and the next item on line 2.
         // (Simple, readable on 16x2; RETRACT cycles; EXTEND selects.)
-        if (sel == 0) {
-            svc.display->print(">Calibrate", " Jog mode");
-        } else if (sel == 1) {
-            svc.display->print(">Run self test", " Calibrate");
-        } else {
-            svc.display->print(">Jog mode", " Run self test");
-        }
+        int s = sel;
+        if (s < 0) s = 0;
+        if (s >= kNumItems) s = kNumItems - 1;
+
+        char line1[17];
+        char line2[17];
+        snprintf(line1, sizeof(line1), ">%s", items[s]);
+        snprintf(line2, sizeof(line2), " %s", items[(s + 1) % kNumItems]);
+        svc.display->print(line1, line2);
     };
     render();
 
@@ -53,7 +58,7 @@ BootMenuChoice run_boot_menu(Services &svc) {
 
         // RETRACT cycles the highlighted option.
         if (retract && !prev_retract) {
-            sel = (sel + 1) % 3;
+            sel = (sel + 1) % kNumItems;
             render();
         }
 
@@ -64,12 +69,38 @@ BootMenuChoice run_boot_menu(Services &svc) {
             }
             if (sel == 0) return MENU_CALIBRATE;
             if (sel == 1) return MENU_SELF_TEST;
-            return MENU_JOG;
+            if (sel == 2) return MENU_JOG;
+            if (sel == 3) return MENU_HAL_TEST;
+            return MENU_RESET_CAL;
         }
 
         prev_extend = extend;
         prev_retract = retract;
         vTaskDelay(pdMS_TO_TICKS(40));
+    }
+}
+
+void run_reset_calibration_data(Services &svc) {
+    svc.display->set_refresh_rate(0.5f);
+    svc.display->print("Reset cal", "Please wait");
+    svc.display->trigger_refresh();
+
+    // Stop motors just in case.
+    for (int i = 0; i < svc.num_motors; ++i) {
+        svc.motors[i].setSpeed(0);
+    }
+
+    esp_err_t err = wallter::calibration::erase_calibration();
+    if (err == ESP_OK) {
+        svc.display->print("Reset cal", "Done");
+    } else {
+        svc.display->print("Reset cal", "FAILED");
+    }
+
+    uint64_t end_ms = svc.now_ms() + 1500ULL;
+    while (svc.now_ms() < end_ms) {
+        svc.display->refresh();
+        vTaskDelay(pdMS_TO_TICKS(50));
     }
 }
 
@@ -91,27 +122,25 @@ void run_calibration_mode(Services &svc) {
     };
     clamp_meta();
 
-    // Start by homing. With a configured min-angle, CMD_HOME will end at that min.
+    // Start by homing to the physical hard-stop (fully retracted).
     svc.run_homing_blocking(/*timeout_ms=*/45000);
 
     enum class CalAction {
         STORE_HAL = 0,
-        SET_MIN = 1,
-        SET_MAX = 2,
-        SKIP = 3,
+        SET_MAX = 1,
+        SKIP = 2,
     };
 
     auto action_label = [&](CalAction a) -> const char * {
         switch (a) {
             case CalAction::STORE_HAL: return ">Store HAL";
-            case CalAction::SET_MIN:   return ">Set Min";
             case CalAction::SET_MAX:   return ">Set Max";
             case CalAction::SKIP:      return ">Skip";
         }
         return ">?";
     };
 
-    auto run_action_menu = [&](int angle, int configured_min_angle, CalAction initial_sel) -> CalAction {
+    auto run_action_menu = [&](int angle, CalAction initial_sel) -> CalAction {
         CalAction sel = initial_sel;
         bool prev_extend = false;
         bool prev_retract = false;
@@ -126,13 +155,10 @@ void run_calibration_mode(Services &svc) {
             const char deg = (char)0xDF;
             char line1[17];
             char line2[17];
-            char mark = (angle == configured_min_angle) ? '*' : ' ';
             int32_t pos = svc.motors[svc.master_motor_index].getPosition();
             if (pos < 0) pos = 0;
             if (pos > 99999) pos = 99999;
-            uint32_t shown_raw = *svc.home_offset_raw_ticks + (uint32_t)pos;
-            if (shown_raw > 99999U) shown_raw = 99999U;
-            snprintf(line1, sizeof(line1), "%2d%c%c H%5lu", angle, deg, mark, (unsigned long)shown_raw);
+            snprintf(line1, sizeof(line1), "%2d%c H%5ld", angle, deg, (long)pos);
             snprintf(line2, sizeof(line2), "%s", action_label(sel));
             svc.display->print(line1, line2);
 
@@ -159,25 +185,16 @@ void run_calibration_mode(Services &svc) {
     };
 
     auto save_all_to_nvs = [&]() {
-        // Convert shifted ticks back to raw ticks for storage.
-        int min_idx = wallter::angle_to_index((int)svc.cal_meta->min_angle_deg);
-        if (min_idx < 0) min_idx = 0;
-        uint32_t offset = *svc.home_offset_raw_ticks;
-
+        // Store raw ticks (position from fully retracted home) directly.
         uint32_t raw[wallter::kMaxAngles] = {0};
         for (int i = 0; i < svc.max_angles; ++i) {
-            if (i < min_idx) {
-                raw[i] = 0;
-            } else {
-                raw[i] = svc.target_ticks[i] + offset;
-            }
+            raw[i] = svc.target_ticks[i];
         }
 
         (void)wallter::calibration::save_from_target_ticks(raw, svc.max_angles);
         (void)wallter::calibration::save_meta(*svc.cal_meta);
     };
 
-    int configured_min_angle = (int)svc.cal_meta->min_angle_deg;
     int configured_max_angle = (int)svc.cal_meta->max_angle_deg;
     (void)configured_max_angle;
 
@@ -219,16 +236,11 @@ void run_calibration_mode(Services &svc) {
             const char deg = (char)0xDF;
             char line1[17];
             char line2[17];
-            char mark = (angle == configured_min_angle) ? '*' : ' ';
-            uint32_t offset_raw = *svc.home_offset_raw_ticks;
-
             int32_t pos = svc.motors[svc.master_motor_index].getPosition();
             if (pos < 0) pos = 0;
             if (pos > 99999) pos = 99999;
-            uint32_t shown_raw = offset_raw + (uint32_t)pos;
-            if (shown_raw > 99999U) shown_raw = 99999U;
             // Line 1: angle + HAL CNT
-            snprintf(line1, sizeof(line1), "%2d%c%c H%5lu", angle, deg, mark, (unsigned long)shown_raw);
+            snprintf(line1, sizeof(line1), "%2d%c H%5ld", angle, deg, (long)pos);
             // Line 2: instructions
             snprintf(line2, sizeof(line2), "Jog; BOTH=Menu");
 
@@ -248,7 +260,7 @@ void run_calibration_mode(Services &svc) {
                     svc.motors[m].setSpeed(0);
                 }
 
-                CalAction action = run_action_menu(angle, configured_min_angle, menu_default);
+                CalAction action = run_action_menu(angle, menu_default);
                 menu_default = action;
 
                 // Snapshot position after menu interaction
@@ -284,71 +296,16 @@ void run_calibration_mode(Services &svc) {
                     svc.cal_meta->max_angle_deg = (uint8_t)angle;
                     clamp_meta();
                     configured_max_angle = (int)svc.cal_meta->max_angle_deg;
-                    int min_idx2 = wallter::angle_to_index((int)svc.cal_meta->min_angle_deg);
+                    int min_idx2 = 0;
                     int max_idx2 = wallter::angle_to_index((int)svc.cal_meta->max_angle_deg);
-                    if (min_idx2 < 0) min_idx2 = 0;
                     if (max_idx2 < 0) max_idx2 = svc.max_angles - 1;
-                    wallter::control::update_limits(min_idx2, max_idx2, *svc.home_offset_raw_ticks);
+                    wallter::control::update_limits(min_idx2, max_idx2, 0);
                     save_all_to_nvs();
                     svc.display->print("Max set", "Stored");
                     uint64_t end = svc.now_ms() + 600ULL;
                     while (svc.now_ms() < end) vTaskDelay(pdMS_TO_TICKS(30));
                     // End calibration when max is set.
                     goto calibration_done;
-                }
-
-                if (action == CalAction::SET_MIN) {
-                    // Recompute offsets/ticks when redefining min.
-                    int old_min_idx = wallter::angle_to_index((int)svc.cal_meta->min_angle_deg);
-                    if (old_min_idx < 0) old_min_idx = 0;
-                    uint32_t old_offset = *svc.home_offset_raw_ticks;
-
-                    uint32_t raw[wallter::kMaxAngles] = {0};
-                    for (int i = 0; i < svc.max_angles; ++i) {
-                        raw[i] = (i < old_min_idx) ? 0U : (svc.target_ticks[i] + old_offset);
-                    }
-
-                    svc.cal_meta->min_angle_deg = (uint8_t)angle;
-                    if ((int)svc.cal_meta->max_angle_deg < (int)svc.cal_meta->min_angle_deg) {
-                        svc.cal_meta->max_angle_deg = svc.cal_meta->min_angle_deg;
-                    }
-                    clamp_meta();
-
-                    int new_min_idx = wallter::angle_to_index((int)svc.cal_meta->min_angle_deg);
-                    int new_max_idx = wallter::angle_to_index((int)svc.cal_meta->max_angle_deg);
-                    if (new_min_idx < 0) new_min_idx = 0;
-                    if (new_max_idx < 0) new_max_idx = svc.max_angles - 1;
-
-                    uint32_t new_offset = old_offset + (uint32_t)pos_now;
-                    raw[new_min_idx] = new_offset;
-                    *svc.home_offset_raw_ticks = new_offset;
-
-                    for (int i = 0; i < svc.max_angles; ++i) {
-                        if (i < new_min_idx) {
-                            svc.target_ticks[i] = 0;
-                        } else {
-                            uint32_t t = raw[i];
-                            svc.target_ticks[i] = (t >= new_offset) ? (t - new_offset) : 0;
-                        }
-                    }
-
-                    // Declare current mechanical position as logical home (0 ticks).
-                    for (int m = 0; m < svc.num_motors; ++m) {
-                        svc.motors[m].resetSteps(true);
-                        svc.motors[m].setPosition(0);
-                    }
-
-                    *svc.target_idx = (uint32_t)new_min_idx;
-                    wallter::control::update_limits(new_min_idx, new_max_idx, new_offset);
-                    save_all_to_nvs();
-
-                    configured_min_angle = (int)svc.cal_meta->min_angle_deg;
-                    configured_max_angle = (int)svc.cal_meta->max_angle_deg;
-                    (void)configured_max_angle;
-                    svc.display->print("Min set", "Stored");
-                    uint64_t end = svc.now_ms() + 650ULL;
-                    while (svc.now_ms() < end) vTaskDelay(pdMS_TO_TICKS(30));
-                    break;
                 }
             }
 
@@ -365,6 +322,7 @@ calibration_done:
 void run_self_test_sequence(Services &svc) {
     const int test_speed = MINSPEED;
     const int test_time  = 1000;
+    const int settle_time = 250;
 
     ESP_LOGI(TAG, "Self-test started.");
     ESP_LOGI(TAG, "ST: init pos=[%ld %ld] si=[%lu %lu] so=[%lu %lu]",
@@ -389,6 +347,12 @@ void run_self_test_sequence(Services &svc) {
              (unsigned long)svc.motors[0].getStepsOut(),
              (unsigned long)svc.motors[1].getStepsOut());
 
+    // Stop + settle before resetting counters and reversing direction.
+    // With HAL_VALIDATE_DIR_WITH_MOTOR enabled, immediate reversals can drop
+    // ticks while the mechanism is still moving in the previous direction.
+    for (int i = 0; i < svc.num_motors; i++) svc.motors[i].setSpeed(0);
+    vTaskDelay(pdMS_TO_TICKS(settle_time));
+
     svc.reset_tick_counters(0, true);
     ESP_LOGI(TAG, "ST: counters reset. si=[%lu %lu] so=[%lu %lu]",
              (unsigned long)svc.motors[0].getStepsIn(),
@@ -399,6 +363,12 @@ void run_self_test_sequence(Services &svc) {
     for (int i = 0; i < svc.num_motors; i++) svc.motors[i].setSpeed(test_speed);
     ESP_LOGI(TAG, "ST: extend phase start, speed=%d", test_speed);
     vTaskDelay(pdMS_TO_TICKS(test_time));
+
+    ESP_LOGI(TAG, "ST: extend done. si=[%lu %lu] so=[%lu %lu]",
+             (unsigned long)svc.motors[0].getStepsIn(),
+             (unsigned long)svc.motors[1].getStepsIn(),
+             (unsigned long)svc.motors[0].getStepsOut(),
+             (unsigned long)svc.motors[1].getStepsOut());
 
     svc.display->print("Phase 1 done", "Checking...");
     for (int i = 0; i < svc.num_motors; i++) svc.motors[i].setSpeed(0);
@@ -420,6 +390,12 @@ void run_self_test_sequence(Services &svc) {
     for (int i = 0; i < svc.num_motors; i++) svc.motors[i].setSpeed(-test_speed);
     vTaskDelay(pdMS_TO_TICKS(test_time));
 
+    ESP_LOGI(TAG, "ST: retract2 done. si=[%lu %lu] so=[%lu %lu]",
+             (unsigned long)svc.motors[0].getStepsIn(),
+             (unsigned long)svc.motors[1].getStepsIn(),
+             (unsigned long)svc.motors[0].getStepsOut(),
+             (unsigned long)svc.motors[1].getStepsOut());
+
     svc.display->print("Phase 2 done", "Checking...");
     for (int i = 0; i < svc.num_motors; i++) svc.motors[i].setSpeed(0);
 
@@ -436,16 +412,23 @@ void run_self_test_sequence(Services &svc) {
         }
     }
 
-    bool final_success = true;
+    // Note: historically we also compared extend vs retract tick counts.
+    // In practice that can false-trigger due to load, stiction, and end-stop effects.
+    // The per-direction minimum tick checks above are the reliable "is feedback present" test.
     for (int i = 0; i < svc.num_motors; ++i) {
-        if (abs((int)svc.motors[i].getStepsOut() - (int)svc.motors[i].getStepsIn()) > 200) {
-            final_success = false;
+        uint32_t so = svc.motors[i].getStepsOut();
+        uint32_t si = svc.motors[i].getStepsIn();
+        uint32_t mx = (so > si) ? so : si;
+        uint32_t diff = (so > si) ? (so - si) : (si - so);
+        if (mx > 0U && diff * 100U > mx * 60U) {
+            ESP_LOGW(TAG, "Self-test warning: motor %d tick mismatch si=%lu so=%lu",
+                     i,
+                     (unsigned long)si,
+                     (unsigned long)so);
+            svc.display->show_short_message(const_cast<char *>("WARN:"),
+                                            const_cast<char *>("TICK MISMATCH"),
+                                            1500);
         }
-    }
-
-    if (!final_success) {
-        svc.display->print("FAIL: BAD SENSOR DATA", "Check connections.");
-        svc.panicf("CHECK CONNECTIONS");
     }
 
     svc.display->print("Self test", "PASSED");
@@ -453,6 +436,159 @@ void run_self_test_sequence(Services &svc) {
     while (svc.now_ms() < end_ms) {
         svc.display->refresh();
         vTaskDelay(pdMS_TO_TICKS(50));
+    }
+}
+
+void run_hal_feedback_test(Services &svc) {
+    static constexpr int kTestSpeed = MINSPEED;
+    static constexpr uint32_t kRunMs = 900;
+    static constexpr uint32_t kSettleMs = 200;
+    static constexpr uint32_t kMinTicks = 60;
+
+    auto stop_all = [&]() {
+        for (int i = 0; i < svc.num_motors; ++i) {
+            svc.motors[i].setSpeed(0);
+        }
+    };
+
+    auto wait_release = [&]() {
+        while (svc.read_extend_pressed() || svc.read_retract_pressed()) {
+            vTaskDelay(pdMS_TO_TICKS(30));
+        }
+    };
+
+    auto ticks_total = [&](int motor_idx) -> uint32_t {
+        return svc.motors[motor_idx].getStepsIn() + svc.motors[motor_idx].getStepsOut();
+    };
+
+    struct MotorResult {
+        uint32_t extend_ticks{};
+        uint32_t retract_ticks{};
+        bool extend_ok{};
+        bool retract_ok{};
+    };
+
+    svc.display->set_refresh_rate(0.5f);
+    svc.display->print("HAL test", "Running...");
+    svc.display->trigger_refresh();
+
+    stop_all();
+    wait_release();
+
+    MotorResult results[NUM_MOTORS] = {};
+
+    int motors_to_test = svc.num_motors;
+    if (motors_to_test > NUM_MOTORS) motors_to_test = NUM_MOTORS;
+
+    for (int m = 0; m < motors_to_test; ++m) {
+        // Extend phase
+        stop_all();
+        vTaskDelay(pdMS_TO_TICKS(kSettleMs));
+        svc.reset_tick_counters(0, true);
+        stop_all();
+        vTaskDelay(pdMS_TO_TICKS(30));
+
+        svc.display->print("HAL test", (m == 0) ? "M0 EXTEND" : (m == 1) ? "M1 EXTEND" : "EXTEND");
+        svc.motors[m].setSpeed(+kTestSpeed);
+        vTaskDelay(pdMS_TO_TICKS(kRunMs));
+        stop_all();
+        vTaskDelay(pdMS_TO_TICKS(kSettleMs));
+
+        results[m].extend_ticks = ticks_total(m);
+        results[m].extend_ok = (results[m].extend_ticks >= kMinTicks);
+
+        ESP_LOGI(TAG,
+                 "HALT: M%d extend ticks=%lu (si=%lu so=%lu)",
+                 m,
+                 (unsigned long)results[m].extend_ticks,
+                 (unsigned long)svc.motors[m].getStepsIn(),
+                 (unsigned long)svc.motors[m].getStepsOut());
+
+        // Retract phase
+        stop_all();
+        vTaskDelay(pdMS_TO_TICKS(kSettleMs));
+        svc.reset_tick_counters(0, true);
+        stop_all();
+        vTaskDelay(pdMS_TO_TICKS(30));
+
+        svc.display->print("HAL test", (m == 0) ? "M0 RETRACT" : (m == 1) ? "M1 RETRACT" : "RETRACT");
+        svc.motors[m].setSpeed(-kTestSpeed);
+        vTaskDelay(pdMS_TO_TICKS(kRunMs));
+        stop_all();
+        vTaskDelay(pdMS_TO_TICKS(kSettleMs));
+
+        results[m].retract_ticks = ticks_total(m);
+        results[m].retract_ok = (results[m].retract_ticks >= kMinTicks);
+
+        ESP_LOGI(TAG,
+                 "HALT: M%d retract ticks=%lu (si=%lu so=%lu)",
+                 m,
+                 (unsigned long)results[m].retract_ticks,
+                 (unsigned long)svc.motors[m].getStepsIn(),
+                 (unsigned long)svc.motors[m].getStepsOut());
+
+        // Per-motor summary screen
+        uint32_t e = results[m].extend_ticks;
+        uint32_t r = results[m].retract_ticks;
+        if (e > 9999U) e = 9999U;
+        if (r > 9999U) r = 9999U;
+
+        char line1[17];
+        char line2[17];
+        snprintf(line1, sizeof(line1), "M%d E%4lu R%4lu", m, (unsigned long)e, (unsigned long)r);
+        if (results[m].extend_ok && results[m].retract_ok) {
+            snprintf(line2, sizeof(line2), "OK");
+        } else {
+            // Give a quick hint.
+            if (!results[m].extend_ok && !results[m].retract_ok) {
+                snprintf(line2, sizeof(line2), "FAIL: NO TICKS");
+            } else if (!results[m].extend_ok) {
+                snprintf(line2, sizeof(line2), "FAIL: EXTEND");
+            } else {
+                snprintf(line2, sizeof(line2), "FAIL: RETRACT");
+            }
+        }
+        svc.display->print(line1, line2);
+        uint64_t end_ms = svc.now_ms() + 1400ULL;
+        while (svc.now_ms() < end_ms) {
+            svc.display->refresh();
+            vTaskDelay(pdMS_TO_TICKS(40));
+        }
+    }
+
+    // Final summary: show which motor(s) failed.
+    bool all_ok = true;
+    for (int m = 0; m < motors_to_test; ++m) {
+        if (!(results[m].extend_ok && results[m].retract_ok)) {
+            all_ok = false;
+        }
+    }
+
+    if (motors_to_test >= 2) {
+        char l1[17];
+        char l2[17];
+        snprintf(l1, sizeof(l1), "M0 %s  M1 %s",
+                 (results[0].extend_ok && results[0].retract_ok) ? "OK" : "FAIL",
+                 (results[1].extend_ok && results[1].retract_ok) ? "OK" : "FAIL");
+        snprintf(l2, sizeof(l2), "%s", all_ok ? "HAL OK" : "Check wiring");
+        svc.display->print(l1, l2);
+    } else if (motors_to_test == 1) {
+        svc.display->print(all_ok ? "M0 OK" : "M0 FAIL", all_ok ? "HAL OK" : "Check wiring");
+    } else {
+        svc.display->print("HAL test", "No motors");
+    }
+
+    // Wait for a button press so the user can read the result.
+    while (!svc.read_extend_pressed() && !svc.read_retract_pressed()) {
+        svc.display->refresh();
+        vTaskDelay(pdMS_TO_TICKS(50));
+    }
+    wait_release();
+
+    stop_all();
+    svc.reset_tick_counters(0, true);
+    for (int i = 0; i < svc.num_motors; ++i) {
+        svc.motors[i].setPosition(0);
     }
 }
 

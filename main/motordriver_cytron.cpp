@@ -5,10 +5,15 @@
 
 static const char *TAG = "MotorDriver";
 
-MotorDriver::MotorDriver(uint8_t pwm_pin, uint8_t dir_pin)
-  : controller(CYTRON_PWM_DIR, static_cast<gpio_num_t>(pwm_pin), static_cast<gpio_num_t>(dir_pin)),
+MotorDriver::MotorDriver(uint8_t pwm_pin, uint8_t dir_pin, ledc_channel_t pwm_channel, bool invert_output)
+    : controller(CYTRON_PWM_DIR,
+                             static_cast<gpio_num_t>(pwm_pin),
+                             static_cast<gpio_num_t>(dir_pin),
+                             pwm_channel,
+                             /*ch2*/ static_cast<ledc_channel_t>((int)pwm_channel + 1)),
     pwm_pin(pwm_pin),
     dir_pin(dir_pin),
+    invert_output_(invert_output),
     last_speed(0),
     last_dir(DIR_STOP),
     last_check_ms(0),
@@ -31,14 +36,22 @@ void MotorDriver::setSpeed(int32_t speed) {
     if (s > 255) s = 255;
     if (s < -255) s = -255;
 
+    int32_t applied = invert_output_ ? -s : s;
+
     if (s == 0) {
-        (void)controller.setSpeed(0);
+        esp_err_t err = controller.setSpeed(0);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "CytronMD setSpeed(0) failed: %d", (int)err);
+        }
         last_speed = 0;
         last_dir   = DIR_STOP;
         return;
     }
 
-    (void)controller.setSpeed((int16_t)s);
+    esp_err_t err = controller.setSpeed((int16_t)applied);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "CytronMD setSpeed(%ld -> %ld) failed: %d", (long)s, (long)applied, (int)err);
+    }
     last_speed = s;
     last_dir   = (s > 0) ? DIR_EXTEND : DIR_RETRACT;
 }

@@ -23,13 +23,13 @@ static void handle_buttons();
 static void setup();
 static Display display;
 static MotorDriver motors[NUM_MOTORS] = {
-    MotorDriver(HAL_PWM[0], HAL_DIR[0]),
-    MotorDriver(HAL_PWM[1], HAL_DIR[1])
+    MotorDriver(HAL_PWM[0], HAL_DIR[0], LEDC_CHANNEL_0, MOTOR_OUTPUT_INVERT),
+    MotorDriver(HAL_PWM[1], HAL_DIR[1], LEDC_CHANNEL_1, MOTOR_OUTPUT_INVERT)
 #if NUM_MOTORS > 2
-    , MotorDriver(HAL_PWM[2], HAL_DIR[2])
+    , MotorDriver(HAL_PWM[2], HAL_DIR[2], LEDC_CHANNEL_2, MOTOR_OUTPUT_INVERT)
 #endif
 #if NUM_MOTORS > 3
-    , MotorDriver(HAL_PWM[3], HAL_DIR[3])
+    , MotorDriver(HAL_PWM[3], HAL_DIR[3], LEDC_CHANNEL_3, MOTOR_OUTPUT_INVERT)
 #endif
 };
 
@@ -42,7 +42,7 @@ static constexpr int MAX_ANGLES = wallter::kMaxAngles;
 static uint32_t g_target_ticks[MAX_ANGLES] = {0};
 static uint32_t g_target_idx = 0;
 
-static wallter::calibration::CalMeta g_cal_meta = { (uint8_t)LOWEST_ANGLE, (uint8_t)HIGHEST_ANGLE };
+static wallter::calibration::CalMeta g_cal_meta = { (uint8_t)DEFAULT_CAL_MIN_ANGLE, (uint8_t)DEFAULT_CAL_MAX_ANGLE };
 static int g_min_target_idx = 0;
 static int g_max_target_idx = 0;
 static uint32_t g_home_offset_raw_ticks = 0;
@@ -53,6 +53,9 @@ static inline uint64_t now_ms() {
 
 static void apply_calibration_meta_and_shift() {
     // Validate and compute indices.
+    // Homing always goes to the physical hard-stop; we no longer use a homing
+    // offset or calibration-table shifting. However, we still honor the stored
+    // min/max angles as *UI/range limits*.
     int min_idx = wallter::angle_to_index((int)g_cal_meta.min_angle_deg);
     int max_idx = wallter::angle_to_index((int)g_cal_meta.max_angle_deg);
     if (min_idx < 0) min_idx = 0;
@@ -60,22 +63,12 @@ static void apply_calibration_meta_and_shift() {
     if (min_idx > max_idx) {
         min_idx = 0;
         max_idx = MAX_ANGLES - 1;
-        g_cal_meta.min_angle_deg = (uint8_t)LOWEST_ANGLE;
-        g_cal_meta.max_angle_deg = (uint8_t)HIGHEST_ANGLE;
+        g_cal_meta.min_angle_deg = (uint8_t)DEFAULT_CAL_MIN_ANGLE;
+        g_cal_meta.max_angle_deg = (uint8_t)DEFAULT_CAL_MAX_ANGLE;
     }
 
-    // Compute raw offset (in the unshifted table) for the chosen minimum.
-    g_home_offset_raw_ticks = g_target_ticks[min_idx];
-
-    // Shift in-place so that the min angle is tick 0. Angles below min become 0.
-    for (int i = 0; i < MAX_ANGLES; ++i) {
-        if (i < min_idx) {
-            g_target_ticks[i] = 0;
-            continue;
-        }
-        uint32_t t = g_target_ticks[i];
-        g_target_ticks[i] = (t >= g_home_offset_raw_ticks) ? (t - g_home_offset_raw_ticks) : 0;
-    }
+    // No homing offset / no shifting.
+    g_home_offset_raw_ticks = 0;
 
     g_min_target_idx = min_idx;
     g_max_target_idx = max_idx;
@@ -125,10 +118,14 @@ extern "C" void app_main(void) {
     svc.panicf = &wallter::control::panicf;
     svc.now_ms = &now_ms;
 
-    // Boot menu: hold EXTEND while starting (latched during setup after GPIO config)
-    bool boot_extend = wallter::inputs::boot_menu_requested();
-    bool boot_retract = wallter::inputs::skip_self_test_requested() || wallter::inputs::read_retract_pressed();
-    if (boot_extend) {
+    // Boot behavior (legacy-compatible):
+    // - Hold EXTEND (only) at boot -> boot menu
+    // - Hold BOTH at boot -> skip auto self-test
+    // - Otherwise -> auto self-test then home
+    bool boot_menu = wallter::inputs::boot_menu_requested();
+    bool skip_self_test = wallter::inputs::boot_skip_self_test_requested();
+
+    if (boot_menu) {
         // Clear any latched interrupt flags before entering menu.
         wallter::inputs::clear_button_events();
 
@@ -138,6 +135,10 @@ extern "C" void app_main(void) {
             wallter::modes::run_calibration_mode(svc);
         } else if (choice == wallter::modes::MENU_SELF_TEST) {
             wallter::modes::run_self_test_sequence(svc);
+        } else if (choice == wallter::modes::MENU_HAL_TEST) {
+            wallter::modes::run_hal_feedback_test(svc);
+        } else if (choice == wallter::modes::MENU_RESET_CAL) {
+            wallter::modes::run_reset_calibration_data(svc);
         } else {
             display.print("Jog mode", "Starting...");
             wallter::modes::run_jog_mode(svc);
@@ -150,11 +151,14 @@ extern "C" void app_main(void) {
         wallter::inputs::clear_boot_menu_requested();
         wallter::inputs::clear_skip_self_test_requested();
     } else {
-        if (boot_retract) {
-            ESP_LOGI(TAG, "Normal boot: skipping self-test (retract held at boot)");
+        if (skip_self_test) {
+            ESP_LOGI(TAG, "Normal boot: skipping self-test (both buttons held)");
         } else {
-            ESP_LOGI(TAG, "Normal boot: running self-test (hold retract at boot to skip)");
+            ESP_LOGI(TAG, "Normal boot: running self-test");
             wallter::modes::run_self_test_sequence(svc);
+            // Self-test moves motors directly; reset counters/positions before homing.
+            wallter::control::reset_tick_counters(0, true);
+            wallter::control::reset_motor_positions();
         }
 
         wallter::inputs::clear_button_events();

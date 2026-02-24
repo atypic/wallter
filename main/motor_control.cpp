@@ -35,12 +35,21 @@ static int g_consecutive_stall[NUM_MOTORS] = {0};
 static int32_t g_last_steps_in[NUM_MOTORS] = {0};
 static int32_t g_last_steps_out[NUM_MOTORS] = {0};
 
-enum class HomePhase {
-    TO_STOP = 0,
-    TO_MIN = 1,
-};
+// Follow safety: only let follower motors move once the master has produced
+// at least one encoder edge in the current command.
+static bool g_master_moved_since_cmd = false;
+static uint32_t g_master_last_si = 0;
+static uint32_t g_master_last_so = 0;
 
-static HomePhase g_home_phase = HomePhase::TO_STOP;
+// Homing stall/timeout tracking (used to avoid getting stuck in CMD_HOME).
+static uint64_t g_home_stall_last_ms = 0;
+static uint32_t g_home_stall_last_steps = 0;
+static uint32_t g_home_stall_accum_ms = 0;
+
+static constexpr uint32_t kHomeTimeoutMs = 45000;
+static constexpr uint32_t kHomeStallWindowMs = 1000;
+static constexpr uint32_t kHomeStallMinDeltaStepsFloor = 3;
+static constexpr uint32_t kHomeStallNeededMs = 2000;
 
 static inline uint64_t now_ms() {
     return (uint64_t)(esp_timer_get_time() / 1000ULL);
@@ -57,6 +66,55 @@ static inline bool throttle(uint64_t &last_ms, uint32_t period_ms) {
     }
     last_ms = n;
     return true;
+}
+
+static void reset_home_stall_tracking() {
+    g_home_stall_last_ms = 0;
+    g_home_stall_last_steps = 0;
+    g_home_stall_accum_ms = 0;
+}
+
+static uint32_t home_min_delta_steps_for_speed(int32_t speed) {
+    uint32_t abs_spd = (uint32_t)((speed < 0) ? -speed : speed);
+    // Heuristic: when commanding higher speed, we expect more encoder ticks per second.
+    // This makes homing tolerant to a few noise edges at the hard-stop.
+    uint32_t scaled = abs_spd / 8U; // 255 -> 31
+    if (scaled < kHomeStallMinDeltaStepsFloor) scaled = kHomeStallMinDeltaStepsFloor;
+    return scaled;
+}
+
+static bool master_stalled_for(uint32_t needed_ms, bool retract_direction, int32_t commanded_speed) {
+    uint64_t n = now_ms();
+    if (g_home_stall_last_ms == 0) {
+        g_home_stall_last_ms = n;
+        g_home_stall_last_steps = retract_direction
+                                  ? g_ctx.motors[g_ctx.master_motor_index].getStepsIn()
+                                  : g_ctx.motors[g_ctx.master_motor_index].getStepsOut();
+        g_home_stall_accum_ms = 0;
+        return false;
+    }
+
+    uint64_t elapsed = n - g_home_stall_last_ms;
+    if (elapsed < (uint64_t)kHomeStallWindowMs) {
+        return false;
+    }
+
+    uint32_t steps = retract_direction
+                     ? g_ctx.motors[g_ctx.master_motor_index].getStepsIn()
+                     : g_ctx.motors[g_ctx.master_motor_index].getStepsOut();
+    uint32_t delta = (steps >= g_home_stall_last_steps) ? (steps - g_home_stall_last_steps) : 0;
+    g_home_stall_last_steps = steps;
+    g_home_stall_last_ms = n;
+
+    uint32_t min_delta = home_min_delta_steps_for_speed(commanded_speed);
+    if (delta < min_delta) {
+        // Treat low step rate as stall (tolerant of occasional noise edges).
+        g_home_stall_accum_ms += kHomeStallWindowMs;
+    } else {
+        g_home_stall_accum_ms = 0;
+    }
+
+    return g_home_stall_accum_ms >= needed_ms;
 }
 
 static bool motors_idle_for(uint32_t ms) {
@@ -157,13 +215,16 @@ void init(const Context &ctx) {
         g_last_steps_out[i] = g_ctx.motors[i].getStepsOut();
     }
 
+    g_master_last_si = g_ctx.motors[g_ctx.master_motor_index].getStepsIn();
+    g_master_last_so = g_ctx.motors[g_ctx.master_motor_index].getStepsOut();
+    g_master_moved_since_cmd = false;
+
     g_current_cmd = wallter::CMD_STOP;
     g_accel_phase = false;
     g_delta_acc_ms = 0;
     g_progress_start_ticks = g_ctx.motors[g_ctx.master_motor_index].getPosition();
     g_last_command_change_ms = now_ms();
 
-    g_home_phase = HomePhase::TO_STOP;
 }
 
 int command() {
@@ -189,7 +250,7 @@ void set_command(int cmd) {
     g_ctx.display->refresh();
 
     if (cmd == wallter::CMD_HOME) {
-        g_home_phase = HomePhase::TO_STOP;
+        reset_home_stall_tracking();
     }
 
     if (cmd == wallter::CMD_EXTEND || cmd == wallter::CMD_RETRACT || cmd == wallter::CMD_HOME) {
@@ -201,6 +262,9 @@ void set_command(int cmd) {
         for (int j = 0; j < g_ctx.num_motors; ++j) {
             g_ctx.motors[j].resetSteps(true);
         }
+        g_master_last_si = g_ctx.motors[g_ctx.master_motor_index].getStepsIn();
+        g_master_last_so = g_ctx.motors[g_ctx.master_motor_index].getStepsOut();
+        g_master_moved_since_cmd = false;
         g_progress_start_ticks = g_ctx.motors[g_ctx.master_motor_index].getPosition();
     } else if (cmd == wallter::CMD_STOP) {
         g_ctx.display->set_refresh_rate(30.0f);
@@ -208,6 +272,7 @@ void set_command(int cmd) {
         for (int i = 0; i < g_ctx.num_motors; ++i) {
             g_ctx.motors[i].resetIdle();
         }
+        g_master_moved_since_cmd = false;
     }
 }
 
@@ -242,24 +307,24 @@ static int32_t get_master_motor_speed() {
     int32_t current_pos = g_ctx.motors[g_ctx.master_motor_index].getPosition();
 
     if (g_current_cmd == wallter::CMD_HOME) {
-        if (g_home_phase == HomePhase::TO_STOP) {
-            // First: retract until stall/idle indicates hard-stop.
-            if (motors_idle_for(2000)) {
-                reset_tick_counters(0, true);
-                reset_motor_positions();
-                // Optional second phase: extend to the configured usable-min offset.
-                if (g_ctx.home_offset_raw_ticks > 0) {
-                    g_home_phase = HomePhase::TO_MIN;
-                    // Start fresh progress tracking from the hard-stop.
-                    g_progress_start_ticks = 0;
-                } else {
-                    g_ctx.display->set_view(LCD_TARGET_VIEW);
-                    target_reached = true;
-                }
-            }
-        } else {
-            // Second: extend forward by home_offset_raw_ticks then stop.
-            if (current_pos >= (int32_t)g_ctx.home_offset_raw_ticks) {
+        // Guard: never allow homing to run forever in the non-blocking main loop.
+        // Mirror the blocking helper's timeout behavior.
+        uint64_t n = now_ms();
+        if ((n - g_last_command_change_ms) > (uint64_t)kHomeTimeoutMs) {
+            ESP_LOGE(TAG, "Homing timeout (%ums)", (unsigned)kHomeTimeoutMs);
+            g_ctx.display->show_short_message(const_cast<char *>("ERROR:"),
+                                              const_cast<char *>("HOME TIMEOUT"),
+                                              2500);
+            g_ctx.display->set_view(LCD_TARGET_VIEW);
+            target_reached = true;
+        }
+
+        if (!target_reached) {
+            // Retract until stall indicates hard-stop ("bottomed out").
+            // When bottomed out, reset all tick counters and motor positions to 0.
+            if (master_stalled_for(kHomeStallNeededMs,
+                                   /*retract_direction=*/true,
+                                   /*commanded_speed=*/-(int32_t)return_speed)) {
                 reset_tick_counters(0, true);
                 reset_motor_positions();
                 g_ctx.display->set_view(LCD_TARGET_VIEW);
@@ -294,17 +359,36 @@ static int32_t get_master_motor_speed() {
         return -(int32_t)return_speed;
     }
     if (g_current_cmd == wallter::CMD_HOME) {
-        // During homing we may be retracting to stop or extending to min.
-        return (g_home_phase == HomePhase::TO_MIN) ? (int32_t)return_speed : -(int32_t)return_speed;
+        // Homing always retracts to the hard-stop.
+        return -(int32_t)return_speed;
     }
     return (int32_t)return_speed;
 }
 
 void iterate() {
+    // Update master movement latch from encoder steps.
+    {
+        uint32_t si = g_ctx.motors[g_ctx.master_motor_index].getStepsIn();
+        uint32_t so = g_ctx.motors[g_ctx.master_motor_index].getStepsOut();
+        if (si != g_master_last_si || so != g_master_last_so) {
+            g_master_moved_since_cmd = true;
+            g_master_last_si = si;
+            g_master_last_so = so;
+        }
+    }
+
     for (int m = 0; m < g_ctx.num_motors; ++m) {
         if (m == g_ctx.master_motor_index) {
             int new_speed = get_master_motor_speed();
             g_ctx.motors[g_ctx.master_motor_index].setSpeed(new_speed);
+            continue;
+        }
+
+        // Safety: don't let followers move unless the master has shown real motion
+        // (encoder edges) since this command started.
+        if (g_current_cmd != wallter::CMD_STOP && !g_master_moved_since_cmd && abs(g_ctx.motors[g_ctx.master_motor_index].getSpeed()) > 0) {
+            g_ctx.motors[m].setSpeed(0);
+            g_ctx.motors[m].pidReset();
             continue;
         }
 
@@ -323,7 +407,8 @@ void iterate() {
             }
             case wallter::CMD_RETRACT:
             case wallter::CMD_HOME: {
-                int32_t spd = g_ctx.motors[m].computeFollow(true,
+                bool reverse = (g_current_cmd == wallter::CMD_RETRACT) || (g_current_cmd == wallter::CMD_HOME);
+                int32_t spd = g_ctx.motors[m].computeFollow(reverse,
                                                            g_accel_phase,
                                                            abs(g_ctx.motors[g_ctx.master_motor_index].getSpeed()),
                                                            g_ctx.motors[g_ctx.master_motor_index]);
@@ -370,14 +455,18 @@ void print_state(uint32_t print_rate_ms) {
     uint32_t si1 = g_ctx.motors[1].getStepsIn();
     uint32_t idle0 = g_ctx.motors[0].getIdleDurationMs();
     uint32_t idle1 = g_ctx.motors[1].getIdleDurationMs();
+    int32_t spd0 = g_ctx.motors[0].getSpeed();
+    int32_t spd1 = g_ctx.motors[1].getSpeed();
 
     ESP_LOGI(TAG,
-             "CMD:%d tgtIdx:%u tgtTicks:%u pos:[%ld %ld] stepsOut:[%lu %lu] stepsIn:[%lu %lu] idleMs:[%u %u]",
+             "CMD:%d tgtIdx:%u tgtTicks:%u pos:[%ld %ld] spd:[%ld %ld] stepsOut:[%lu %lu] stepsIn:[%lu %lu] idleMs:[%u %u]",
              (int)g_current_cmd,
              (unsigned)*g_ctx.target_idx,
              (unsigned)tgt,
              (long)pos0,
              (long)pos1,
+             (long)spd0,
+             (long)spd1,
              (unsigned long)so0,
              (unsigned long)so1,
              (unsigned long)si0,
@@ -418,8 +507,9 @@ void error_check_motor_positions() {
         }
 
         bool moved_expected = false;
-        if (g_current_cmd == wallter::CMD_RETRACT) moved_expected = (dso > 0);
-        else if (g_current_cmd == wallter::CMD_EXTEND) moved_expected = (dsi > 0);
+        // With our step accounting: EXTEND increments stepsOut, RETRACT increments stepsIn.
+        if (g_current_cmd == wallter::CMD_RETRACT) moved_expected = (dsi > 0);
+        else if (g_current_cmd == wallter::CMD_EXTEND) moved_expected = (dso > 0);
 
         bool ok;
         if (!moved_expected || g_accel_phase) {
@@ -451,9 +541,18 @@ void error_check_motor_positions() {
                      (long)so,
                      (long)dsi,
                      (long)dso);
+
+            // Safety: stop instead of hard-panicking so we can keep debugging in the field.
+            for (int m = 0; m < g_ctx.num_motors; ++m) {
+                g_ctx.motors[m].setSpeed(0);
+                g_ctx.motors[m].pidReset();
+            }
+            set_command(wallter::CMD_STOP);
             char msg[32];
-            snprintf(msg, sizeof(msg), "M%d STALL p%ld", i, (long)pos);
-            panicf("%s", msg);
+            snprintf(msg, sizeof(msg), "M%d NO ENCODER", i);
+            g_ctx.display->show_short_message(const_cast<char *>("ERROR:"), msg, 2500);
+            g_consecutive_stall[i] = 0;
+            return;
         }
     }
 }
@@ -518,7 +617,8 @@ void update_limits(int min_target_idx, int max_target_idx, uint32_t home_offset_
 
     g_ctx.min_target_idx = min_target_idx;
     g_ctx.max_target_idx = max_target_idx;
-    g_ctx.home_offset_raw_ticks = home_offset_raw_ticks;
+    (void)home_offset_raw_ticks;
+    g_ctx.home_offset_raw_ticks = 0;
 
     if ((int)*g_ctx.target_idx < g_ctx.min_target_idx) *g_ctx.target_idx = (uint32_t)g_ctx.min_target_idx;
     if ((int)*g_ctx.target_idx > g_ctx.max_target_idx) *g_ctx.target_idx = (uint32_t)g_ctx.max_target_idx;

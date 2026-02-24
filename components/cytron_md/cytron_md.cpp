@@ -2,8 +2,16 @@
 #include "esp_check.h"
 #include "esp_log.h"
 
-CytronMD::CytronMD(CytronMode mode, gpio_num_t pin1, gpio_num_t pin2)
-  : mode_(mode), pin1_(pin1), pin2_(pin2) {}
+CytronMD::CytronMD(CytronMode mode,
+                   gpio_num_t pin1,
+                   gpio_num_t pin2,
+                   ledc_channel_t ch1,
+                   ledc_channel_t ch2)
+  : mode_(mode),
+    pin1_(pin1),
+    pin2_(pin2),
+    ch1_(ch1),
+    ch2_(ch2) {}
 
 esp_err_t CytronMD::init(ledc_timer_t timer,
                          ledc_mode_t speed_mode,

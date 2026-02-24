@@ -20,7 +20,8 @@ esp_err_t init_nvs();
 // Always ensures home (lowest angle) is 0 ticks and derives the 15° entry.
 bool load_or_default(uint32_t *target_ticks, int target_len);
 
-// Saves the current calibration slice (20..60 step 5) from the provided target table.
+// Saves the current calibration table (LOWEST_ANGLE..HIGHEST_ANGLE in ANGLE_STEP)
+// from the provided target table.
 esp_err_t save_from_target_ticks(const uint32_t *target_ticks, int target_len);
 
 // Additional metadata describing the usable angle range.
@@ -36,5 +37,8 @@ bool load_meta_or_default(CalMeta &out);
 
 // Saves min/max angles to NVS.
 esp_err_t save_meta(const CalMeta &meta);
+
+// Deletes stored calibration data from NVS (ticks + meta). Next boot/load will use defaults.
+esp_err_t erase_calibration();
 
 } // namespace wallter::calibration

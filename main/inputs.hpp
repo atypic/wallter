@@ -20,6 +20,8 @@ bool read_extend_pressed();
 bool read_retract_pressed();
 
 bool boot_menu_requested();
+// Legacy behavior: holding BOTH buttons at boot skips the automatic self-test.
+bool boot_skip_self_test_requested();
 void clear_boot_menu_requested();
 
 // Boot-time request to skip the power-on self-test (latched during init).

@@ -9,7 +9,11 @@ enum CytronMode { CYTRON_PWM_DIR, CYTRON_PWM_PWM };
 class CytronMD {
 public:
   // Constructor: provide mode and pins
-  CytronMD(CytronMode mode, gpio_num_t pin1, gpio_num_t pin2);
+  CytronMD(CytronMode mode,
+           gpio_num_t pin1,
+           gpio_num_t pin2,
+           ledc_channel_t ch1 = LEDC_CHANNEL_0,
+           ledc_channel_t ch2 = LEDC_CHANNEL_1);
 
   // Initialize GPIO + LEDC. Provide LEDC timer, frequency, resolution (bits).
   esp_err_t init(ledc_timer_t timer = LEDC_TIMER_0,
@@ -31,8 +35,8 @@ private:
   uint32_t freq_hz_ = 20000;
 
   // LEDC channels used (only ch1 used for PWM_DIR; both for PWM_PWM)
-  ledc_channel_t ch1_ = LEDC_CHANNEL_0;
-  ledc_channel_t ch2_ = LEDC_CHANNEL_1;
+  ledc_channel_t ch1_;
+  ledc_channel_t ch2_;
 
   bool initialized_ = false;
 

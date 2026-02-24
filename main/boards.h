@@ -107,6 +107,11 @@ static const bool g_has_keypad = false;
 #define HIGHEST_ANGLE 60
 #define ANGLE_STEP 5
 
+// Default calibration range (used when NVS has no calibration meta stored).
+// We only use 30..60 by default on this hardware.
+#define DEFAULT_CAL_MIN_ANGLE 30
+#define DEFAULT_CAL_MAX_ANGLE 60
+
 #define MASTER_MOTOR 0
 
 #define ACCEL_STEP 1
@@ -129,11 +134,49 @@ static const bool g_has_keypad = false;
 #define LCD_SCL_PIN 6
 #define LCD_I2C_CLOCK_HZ 50000
 
-// HAL encoder pins (as wired on the latest board spin)
+// HAL encoder pin mapping varies across board spins.
+// Select the pinset here to match your wiring.
+// - 1: legacy pinout (matches commit 9794e3c)
+// - 2: newer pinout (latest board spin)
+#ifndef ARCTIC_CYTRON_ENCODER_PINSET
+#define ARCTIC_CYTRON_ENCODER_PINSET 2
+#endif
+
+#if ARCTIC_CYTRON_ENCODER_PINSET == 1
+// Legacy (commit 9794e3c):
+// Motor 0: HAL_CLK=GPIO12, HAL_CNT=GPIO11
+// Motor 1: HAL_CLK=GPIO10, HAL_CNT=GPIO9
+static const unsigned int HAL_CLK[NUM_MOTORS] = {12, 10};
+static const unsigned int HAL_CNT[NUM_MOTORS] = {11, 9};
+#else
+// Newer board spin:
 // Motor 0: HAL_CLK=GPIO46, HAL_CNT=GPIO9
 // Motor 1: HAL_CLK=GPIO10, HAL_CNT=GPIO11
 static const unsigned int HAL_CLK[NUM_MOTORS] = {46, 10};
 static const unsigned int HAL_CNT[NUM_MOTORS] = {9, 11};
+#endif
+
+// If you accidentally swapped the HAL encoder signals when soldering (CLK<->CNT),
+// set this to 1 and reflash.
+#define HAL_AB_SWAPPED 0
+
+// If HAL_CNT (direction) is floating/miswired, the direction bit will look random
+// and you'll accumulate both stepsIn and stepsOut during a single move.
+// Set this to 1 to derive direction from the commanded motor direction instead.
+#define HAL_DIR_FROM_MOTOR 0
+
+// Optional: reject encoder edges whose sensed direction disagrees with the
+// commanded motor direction. Helps when HAL_CNT is noisy.
+#define HAL_VALIDATE_DIR_WITH_MOTOR 0
+
+// Minimum HAL_CLK pulse width to accept as a real tick.
+// This mirrors the old Arduino Due behavior where we rejected narrow spikes
+// (e.g. `setDebounce(HAL_CLK, 1000)` for ~1ms).
+#define HAL_CLK_MIN_PULSE_US 1000
+
+// The HAL_CNT polarity appears inverted on this board spin:
+// sampling HAL_CNT on HAL_CLK rising yields 0/1 swapped vs expected direction.
+#define HAL_CNT_INVERT 1
 
 // Button pins (swapped on hardware: EXTEND/RETRACT are flipped)
 #define BUTTON_EXTEND_PIN 47
@@ -145,6 +188,49 @@ static const unsigned int HAL_CNT[NUM_MOTORS] = {9, 11};
 static const unsigned int HAL_PWM[NUM_MOTORS] = {16, 18};
 static const unsigned int HAL_DIR[NUM_MOTORS] = {17, 8};
 
+// Motor output inversion.
+// If homing drives the wrong physical direction, set this to 1.
+#define MOTOR_OUTPUT_INVERT 0
+
+#endif
+
+// Default: motor output sign is not inverted.
+#ifndef MOTOR_OUTPUT_INVERT
+#define MOTOR_OUTPUT_INVERT 0
+#endif
+
+// Default calibration meta fallbacks (board may override above).
+#ifndef DEFAULT_CAL_MIN_ANGLE
+#define DEFAULT_CAL_MIN_ANGLE LOWEST_ANGLE
+#endif
+
+#ifndef DEFAULT_CAL_MAX_ANGLE
+#define DEFAULT_CAL_MAX_ANGLE HIGHEST_ANGLE
+#endif
+
+// Default: do not invert HAL_CNT unless a board override says so.
+#ifndef HAL_CNT_INVERT
+#define HAL_CNT_INVERT 0
+#endif
+
+// Default: HAL encoder channels are not swapped.
+#ifndef HAL_AB_SWAPPED
+#define HAL_AB_SWAPPED 0
+#endif
+
+// Default: derive direction from HAL_CNT sampling.
+#ifndef HAL_DIR_FROM_MOTOR
+#define HAL_DIR_FROM_MOTOR 0
+#endif
+
+// Default: do not validate HAL direction vs motor command.
+#ifndef HAL_VALIDATE_DIR_WITH_MOTOR
+#define HAL_VALIDATE_DIR_WITH_MOTOR 0
+#endif
+
+// Default: accept all HAL_CLK pulses (no width filter).
+#ifndef HAL_CLK_MIN_PULSE_US
+#define HAL_CLK_MIN_PULSE_US 0
 #endif
 
 // -----------------------------------------------------------------------------
