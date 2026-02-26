@@ -50,14 +50,18 @@ int decide_command_for_target(int32_t current_pos,
                               int cmd_extend,
                               int cmd_retract,
                               int cmd_home) {
-    if (new_target_pos == current_pos) {
+    int32_t pos = current_pos;
+    if (pos < 0) pos = 0;
+    int32_t tgt = (new_target_pos > (uint32_t)INT32_MAX) ? INT32_MAX : (int32_t)new_target_pos;
+
+    if (tgt == pos) {
         return cmd_stop;
     }
-    if (new_target_pos == 0 && new_target_pos < (uint32_t)current_pos) {
+    if (tgt == 0 && tgt < pos) {
         ESP_LOGI("buttons", "Homing.");
         return cmd_home;
     }
-    if (new_target_pos > (uint32_t)current_pos) {
+    if (tgt > pos) {
         ESP_LOGI("buttons", "Extending (idle).");
         return cmd_extend;
     }
@@ -70,11 +74,15 @@ bool is_target_change_permitted(int32_t current_pos,
                                 int current_cmd,
                                 int cmd_extend,
                                 int cmd_retract) {
-    if (current_cmd == cmd_extend && new_target_pos < (uint32_t)current_pos) {
+    int32_t pos = current_pos;
+    if (pos < 0) pos = 0;
+    int32_t tgt = (new_target_pos > (uint32_t)INT32_MAX) ? INT32_MAX : (int32_t)new_target_pos;
+
+    if (current_cmd == cmd_extend && tgt < pos) {
         ESP_LOGW("buttons", "Direction mismatch (extend->retract).");
         return false;
     }
-    if (current_cmd == cmd_retract && new_target_pos > (uint32_t)current_pos) {
+    if (current_cmd == cmd_retract && tgt > pos) {
         ESP_LOGW("buttons", "Direction mismatch (retract->extend).");
         return false;
     }

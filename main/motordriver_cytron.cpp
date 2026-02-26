@@ -1,6 +1,7 @@
 #include "motordriver.hpp"
 #include "cytron_md.hpp"
 #include "esp_log.h"
+#include "esp_attr.h"
 #include "esp_timer.h"
 
 static const char *TAG = "MotorDriver";
@@ -56,8 +57,8 @@ void MotorDriver::setSpeed(int32_t speed) {
     last_dir   = (s > 0) ? DIR_EXTEND : DIR_RETRACT;
 }
 
-int32_t MotorDriver::getSpeed() const { return last_speed; }
-MotorDirection MotorDriver::getDirection() const { return last_dir; }
+int32_t IRAM_ATTR MotorDriver::getSpeed() const { return last_speed; }
+MotorDirection IRAM_ATTR MotorDriver::getDirection() const { return last_dir; }
 
 bool MotorDriver::errorCheck(uint32_t steps_in,
                              uint32_t steps_out,
@@ -97,13 +98,13 @@ bool MotorDriver::errorCheck(uint32_t steps_in,
     return ok;
 }
 
-void MotorDriver::incrementStepIn() {
+void IRAM_ATTR MotorDriver::incrementStepIn() {
     steps_in.fetch_add(1, std::memory_order_relaxed);
     // Mirror old driver: stepping IN decrements position
     position -= 1;
     last_move_ms = (uint32_t)(esp_timer_get_time() / 1000ULL);
 }
-void MotorDriver::incrementStepOut() {
+void IRAM_ATTR MotorDriver::incrementStepOut() {
     steps_out.fetch_add(1, std::memory_order_relaxed);
     // Mirror old driver: stepping OUT increments position
     position += 1;
@@ -112,9 +113,6 @@ void MotorDriver::incrementStepOut() {
 uint32_t MotorDriver::getStepsIn() const { return steps_in.load(std::memory_order_relaxed); }
 uint32_t MotorDriver::getStepsOut() const { return steps_out.load(std::memory_order_relaxed); }
 void MotorDriver::resetSteps(bool /*all*/) { steps_in.store(0, std::memory_order_relaxed); steps_out.store(0, std::memory_order_relaxed); }
-
-void MotorDriver::incrementPosition(int32_t delta) { 
-    position += delta; }
 void MotorDriver::setPosition(int32_t pos) { position = pos; }
 int32_t MotorDriver::getPosition() const { return position; }
 

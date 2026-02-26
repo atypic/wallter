@@ -42,14 +42,17 @@ static uint32_t g_master_last_si = 0;
 static uint32_t g_master_last_so = 0;
 
 // Homing stall/timeout tracking (used to avoid getting stuck in CMD_HOME).
-static uint64_t g_home_stall_last_ms = 0;
-static uint32_t g_home_stall_last_steps = 0;
-static uint32_t g_home_stall_accum_ms = 0;
+static uint32_t g_home_last_steps_in = 0;
+static uint64_t g_home_last_steps_in_change_ms = 0;
+static uint64_t g_home_start_ms = 0;
+static uint32_t g_home_steps_in_motion_base = 0;
+static uint64_t g_home_last_motion_ms = 0;
+static bool g_home_saw_steps_in_motion = false;
 
-static constexpr uint32_t kHomeTimeoutMs = 45000;
-static constexpr uint32_t kHomeStallWindowMs = 1000;
-static constexpr uint32_t kHomeStallMinDeltaStepsFloor = 3;
-static constexpr uint32_t kHomeStallNeededMs = 2000;
+static constexpr uint32_t kHomeNoStepsInMs = 800;
+static constexpr uint32_t kHomeStepsInMotionDelta = 5;
+static constexpr uint32_t kHomeMinRuntimeMs = 1000;
+static constexpr uint32_t kHomeIdleDoneMs = 2000;
 
 static inline uint64_t now_ms() {
     return (uint64_t)(esp_timer_get_time() / 1000ULL);
@@ -68,62 +71,14 @@ static inline bool throttle(uint64_t &last_ms, uint32_t period_ms) {
     return true;
 }
 
-static void reset_home_stall_tracking() {
-    g_home_stall_last_ms = 0;
-    g_home_stall_last_steps = 0;
-    g_home_stall_accum_ms = 0;
-}
-
-static uint32_t home_min_delta_steps_for_speed(int32_t speed) {
-    uint32_t abs_spd = (uint32_t)((speed < 0) ? -speed : speed);
-    // Heuristic: when commanding higher speed, we expect more encoder ticks per second.
-    // This makes homing tolerant to a few noise edges at the hard-stop.
-    uint32_t scaled = abs_spd / 8U; // 255 -> 31
-    if (scaled < kHomeStallMinDeltaStepsFloor) scaled = kHomeStallMinDeltaStepsFloor;
-    return scaled;
-}
-
-static bool master_stalled_for(uint32_t needed_ms, bool retract_direction, int32_t commanded_speed) {
+static void reset_home_tracking() {
+    g_home_last_steps_in = g_ctx.motors[g_ctx.master_motor_index].getStepsIn();
     uint64_t n = now_ms();
-    if (g_home_stall_last_ms == 0) {
-        g_home_stall_last_ms = n;
-        g_home_stall_last_steps = retract_direction
-                                  ? g_ctx.motors[g_ctx.master_motor_index].getStepsIn()
-                                  : g_ctx.motors[g_ctx.master_motor_index].getStepsOut();
-        g_home_stall_accum_ms = 0;
-        return false;
-    }
-
-    uint64_t elapsed = n - g_home_stall_last_ms;
-    if (elapsed < (uint64_t)kHomeStallWindowMs) {
-        return false;
-    }
-
-    uint32_t steps = retract_direction
-                     ? g_ctx.motors[g_ctx.master_motor_index].getStepsIn()
-                     : g_ctx.motors[g_ctx.master_motor_index].getStepsOut();
-    uint32_t delta = (steps >= g_home_stall_last_steps) ? (steps - g_home_stall_last_steps) : 0;
-    g_home_stall_last_steps = steps;
-    g_home_stall_last_ms = n;
-
-    uint32_t min_delta = home_min_delta_steps_for_speed(commanded_speed);
-    if (delta < min_delta) {
-        // Treat low step rate as stall (tolerant of occasional noise edges).
-        g_home_stall_accum_ms += kHomeStallWindowMs;
-    } else {
-        g_home_stall_accum_ms = 0;
-    }
-
-    return g_home_stall_accum_ms >= needed_ms;
-}
-
-static bool motors_idle_for(uint32_t ms) {
-    for (int m = 0; m < g_ctx.num_motors; m++) {
-        if (g_ctx.motors[m].getIdleDurationMs() < ms) {
-            return false;
-        }
-    }
-    return true;
+    g_home_last_steps_in_change_ms = n;
+    g_home_start_ms = n;
+    g_home_steps_in_motion_base = g_home_last_steps_in;
+    g_home_last_motion_ms = n;
+    g_home_saw_steps_in_motion = false;
 }
 
 void reset_idle_timer() {
@@ -250,7 +205,10 @@ void set_command(int cmd) {
     g_ctx.display->refresh();
 
     if (cmd == wallter::CMD_HOME) {
-        reset_home_stall_tracking();
+        reset_home_tracking();
+        // Force homing view while homing.
+        g_ctx.display->update_homing_view();
+        g_ctx.display->set_view(LCD_HOMING_VIEW);
     }
 
     if (cmd == wallter::CMD_EXTEND || cmd == wallter::CMD_RETRACT || cmd == wallter::CMD_HOME) {
@@ -266,8 +224,16 @@ void set_command(int cmd) {
         g_master_last_so = g_ctx.motors[g_ctx.master_motor_index].getStepsOut();
         g_master_moved_since_cmd = false;
         g_progress_start_ticks = g_ctx.motors[g_ctx.master_motor_index].getPosition();
+
+        if (cmd == wallter::CMD_HOME) {
+            // Baseline homing completion detection after step counters are reset.
+            reset_home_tracking();
+        }
     } else if (cmd == wallter::CMD_STOP) {
-        g_ctx.display->set_refresh_rate(30.0f);
+        // Keep the LCD reasonably responsive even when stopped.
+        // A very slow refresh here can leave the display showing "Homing..." for a long time
+        // after motors stop.
+        g_ctx.display->set_refresh_rate(1.0f);
         g_progress_start_ticks = g_ctx.motors[g_ctx.master_motor_index].getPosition();
         for (int i = 0; i < g_ctx.num_motors; ++i) {
             g_ctx.motors[i].resetIdle();
@@ -278,9 +244,6 @@ void set_command(int cmd) {
 
 static int32_t get_master_motor_speed() {
     int32_t target = (int32_t)g_ctx.target_ticks[*g_ctx.target_idx];
-    if (g_current_cmd == wallter::CMD_HOME) {
-        target = -1000000;
-    }
 
     uint32_t return_speed = (uint32_t)abs(g_ctx.motors[g_ctx.master_motor_index].getSpeed());
     if ((return_speed < (uint32_t)MINSPEED) && (g_current_cmd != wallter::CMD_STOP)) {
@@ -307,26 +270,62 @@ static int32_t get_master_motor_speed() {
     int32_t current_pos = g_ctx.motors[g_ctx.master_motor_index].getPosition();
 
     if (g_current_cmd == wallter::CMD_HOME) {
-        // Guard: never allow homing to run forever in the non-blocking main loop.
-        // Mirror the blocking helper's timeout behavior.
         uint64_t n = now_ms();
-        if ((n - g_last_command_change_ms) > (uint64_t)kHomeTimeoutMs) {
-            ESP_LOGE(TAG, "Homing timeout (%ums)", (unsigned)kHomeTimeoutMs);
-            g_ctx.display->show_short_message(const_cast<char *>("ERROR:"),
-                                              const_cast<char *>("HOME TIMEOUT"),
-                                              2500);
+
+        // Fast path: if we've been idle for long enough during homing, we're bottomed out.
+        // This uses the same underlying step activity as the encoder counters, but avoids
+        // getting stuck on sporadic single-tick noise.
+        uint32_t idle_ms = g_ctx.motors[g_ctx.master_motor_index].getIdleDurationMs();
+        if (idle_ms >= kHomeIdleDoneMs) {
+            ESP_LOGI(TAG, "Home complete by idle: idleMs=%u pos=%ld si=%lu so=%lu",
+                     (unsigned)idle_ms,
+                     (long)g_ctx.motors[g_ctx.master_motor_index].getPosition(),
+                     (unsigned long)g_ctx.motors[g_ctx.master_motor_index].getStepsIn(),
+                     (unsigned long)g_ctx.motors[g_ctx.master_motor_index].getStepsOut());
+            reset_tick_counters(0, true);
+            reset_motor_positions();
+            g_ctx.display->set_next_view(LCD_TARGET_VIEW);
             g_ctx.display->set_view(LCD_TARGET_VIEW);
             target_reached = true;
         }
 
-        if (!target_reached) {
-            // Retract until stall indicates hard-stop ("bottomed out").
-            // When bottomed out, reset all tick counters and motor positions to 0.
-            if (master_stalled_for(kHomeStallNeededMs,
-                                   /*retract_direction=*/true,
-                                   /*commanded_speed=*/-(int32_t)return_speed)) {
+        // Homing mode means: retract as much as possible; do not stop retracting
+        // until we observe no further movement on stepsIn.
+        uint32_t si = g_ctx.motors[g_ctx.master_motor_index].getStepsIn();
+
+        // Track any stepsIn changes (useful for debugging / sanity), but only treat
+        // sufficiently large deltas as real motion to avoid noise keeping us in HOME.
+        if (si != g_home_last_steps_in) {
+            g_home_last_steps_in = si;
+            g_home_last_steps_in_change_ms = n;
+        }
+
+        uint32_t delta_since_motion = (si >= g_home_steps_in_motion_base) ? (si - g_home_steps_in_motion_base) : 0;
+        if (delta_since_motion >= kHomeStepsInMotionDelta) {
+            g_home_steps_in_motion_base = si;
+            g_home_last_motion_ms = n;
+            g_home_saw_steps_in_motion = true;
+        }
+
+        if (!target_reached && g_home_saw_steps_in_motion) {
+            if ((n - g_home_last_motion_ms) > (uint64_t)kHomeNoStepsInMs) {
                 reset_tick_counters(0, true);
                 reset_motor_positions();
+                g_ctx.display->set_next_view(LCD_TARGET_VIEW);
+                g_ctx.display->set_view(LCD_TARGET_VIEW);
+                target_reached = true;
+            }
+        }
+
+        // If we never saw enough stepsIn to qualify as "real motion", we might already be
+        // bottomed out at the hard-stop. In that case we still want homing to complete once
+        // stepsIn has been stable for the same no-movement window.
+        if (!target_reached && !g_home_saw_steps_in_motion) {
+            if ((n - g_home_start_ms) > (uint64_t)kHomeMinRuntimeMs &&
+                (n - g_home_last_steps_in_change_ms) > (uint64_t)kHomeNoStepsInMs) {
+                reset_tick_counters(0, true);
+                reset_motor_positions();
+                g_ctx.display->set_next_view(LCD_TARGET_VIEW);
                 g_ctx.display->set_view(LCD_TARGET_VIEW);
                 target_reached = true;
             }
@@ -430,14 +429,11 @@ void run_homing_blocking(uint32_t timeout_ms) {
     reset_idle_timer();
     set_command(wallter::CMD_HOME);
 
-    uint64_t start = now_ms();
+    (void)timeout_ms;
     while (g_current_cmd != wallter::CMD_STOP) {
         iterate();
         g_ctx.display->refresh();
         vTaskDelay(pdMS_TO_TICKS(50));
-        if ((now_ms() - start) > timeout_ms) {
-            panicf("HOME TIMEOUT");
-        }
     }
 }
 
@@ -445,6 +441,9 @@ void print_state(uint32_t print_rate_ms) {
     if (!throttle(g_last_print_ms, print_rate_ms)) {
         return;
     }
+
+    static uint32_t last_si0 = 0, last_si1 = 0;
+    static uint32_t last_so0 = 0, last_so1 = 0;
 
     uint32_t tgt = g_ctx.target_ticks[*g_ctx.target_idx];
     int32_t pos0 = g_ctx.motors[0].getPosition();
@@ -457,9 +456,33 @@ void print_state(uint32_t print_rate_ms) {
     uint32_t idle1 = g_ctx.motors[1].getIdleDurationMs();
     int32_t spd0 = g_ctx.motors[0].getSpeed();
     int32_t spd1 = g_ctx.motors[1].getSpeed();
+    MotorDirection dir0 = g_ctx.motors[0].getDirection();
+    MotorDirection dir1 = g_ctx.motors[1].getDirection();
+
+    // Detect "both directions at once" within a single print window.
+    // This should never happen if direction classification is stable.
+    uint32_t dsi0 = (si0 >= last_si0) ? (si0 - last_si0) : 0;
+    uint32_t dso0 = (so0 >= last_so0) ? (so0 - last_so0) : 0;
+    uint32_t dsi1 = (si1 >= last_si1) ? (si1 - last_si1) : 0;
+    uint32_t dso1 = (so1 >= last_so1) ? (so1 - last_so1) : 0;
+    last_si0 = si0;
+    last_so0 = so0;
+    last_si1 = si1;
+    last_so1 = so1;
+    if ((dsi0 > 0 && dso0 > 0) || (dsi1 > 0 && dso1 > 0)) {
+        ESP_LOGW(TAG,
+                 "Encoder dir anomaly: dsi0=%lu dso0=%lu dsi1=%lu dso1=%lu cmd=%d dir0=%d dir1=%d",
+                 (unsigned long)dsi0,
+                 (unsigned long)dso0,
+                 (unsigned long)dsi1,
+                 (unsigned long)dso1,
+                 (int)g_current_cmd,
+                 (int)dir0,
+                 (int)dir1);
+    }
 
     ESP_LOGI(TAG,
-             "CMD:%d tgtIdx:%u tgtTicks:%u pos:[%ld %ld] spd:[%ld %ld] stepsOut:[%lu %lu] stepsIn:[%lu %lu] idleMs:[%u %u]",
+             "CMD:%d tgtIdx:%u tgtTicks:%u pos:[%ld %ld] spd:[%ld %ld] dir:[%d %d] stepsOut:[%lu %lu] stepsIn:[%lu %lu] idleMs:[%u %u]",
              (int)g_current_cmd,
              (unsigned)*g_ctx.target_idx,
              (unsigned)tgt,
@@ -467,6 +490,8 @@ void print_state(uint32_t print_rate_ms) {
              (long)pos1,
              (long)spd0,
              (long)spd1,
+             (int)dir0,
+             (int)dir1,
              (unsigned long)so0,
              (unsigned long)so1,
              (unsigned long)si0,
@@ -606,7 +631,7 @@ void handle_buttons(bool extend_event, bool retract_event) {
     g_ctx.display->trigger_refresh();
 }
 
-void update_limits(int min_target_idx, int max_target_idx, uint32_t home_offset_raw_ticks) {
+void update_limits(int min_target_idx, int max_target_idx) {
     if (min_target_idx < 0) min_target_idx = 0;
     if (max_target_idx < 0) max_target_idx = 0;
     if (max_target_idx >= g_ctx.max_angles) max_target_idx = g_ctx.max_angles - 1;
@@ -617,8 +642,6 @@ void update_limits(int min_target_idx, int max_target_idx, uint32_t home_offset_
 
     g_ctx.min_target_idx = min_target_idx;
     g_ctx.max_target_idx = max_target_idx;
-    (void)home_offset_raw_ticks;
-    g_ctx.home_offset_raw_ticks = 0;
 
     if ((int)*g_ctx.target_idx < g_ctx.min_target_idx) *g_ctx.target_idx = (uint32_t)g_ctx.min_target_idx;
     if ((int)*g_ctx.target_idx > g_ctx.max_target_idx) *g_ctx.target_idx = (uint32_t)g_ctx.max_target_idx;

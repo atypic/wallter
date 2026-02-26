@@ -30,7 +30,6 @@ struct Services {
 
     // Calibration metadata (min/max usable angles) and derived homing offset.
     wallter::calibration::CalMeta *cal_meta{};
-    uint32_t *home_offset_raw_ticks{};
 
     // Hardware button level reads (active-low -> true means pressed)
     bool (*read_extend_pressed)() = nullptr;

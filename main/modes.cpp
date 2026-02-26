@@ -5,6 +5,8 @@
 #include "calibration_store.hpp"
 #include "commands.hpp"
 
+#include "inputs.hpp"
+
 #include "motor_control.hpp"
 
 #include "display.hpp"
@@ -105,7 +107,7 @@ void run_reset_calibration_data(Services &svc) {
 }
 
 void run_calibration_mode(Services &svc) {
-    if (!svc.cal_meta || !svc.home_offset_raw_ticks) {
+    if (!svc.cal_meta) {
         svc.panicf("NO META");
     }
 
@@ -299,7 +301,7 @@ void run_calibration_mode(Services &svc) {
                     int min_idx2 = 0;
                     int max_idx2 = wallter::angle_to_index((int)svc.cal_meta->max_angle_deg);
                     if (max_idx2 < 0) max_idx2 = svc.max_angles - 1;
-                    wallter::control::update_limits(min_idx2, max_idx2, 0);
+                    wallter::control::update_limits(min_idx2, max_idx2);
                     save_all_to_nvs();
                     svc.display->print("Max set", "Stored");
                     uint64_t end = svc.now_ms() + 600ULL;
@@ -385,6 +387,16 @@ void run_self_test_sequence(Services &svc) {
             svc.panicf("M%d NO OUT", i);
         }
     }
+
+    // Stop + settle before resetting counters and reversing direction.
+    // This matches the first phase behavior and keeps per-phase tick checks isolated.
+    vTaskDelay(pdMS_TO_TICKS(settle_time));
+    svc.reset_tick_counters(0, true);
+    ESP_LOGI(TAG, "ST: counters reset (before retract2). si=[%lu %lu] so=[%lu %lu]",
+             (unsigned long)svc.motors[0].getStepsIn(),
+             (unsigned long)svc.motors[1].getStepsIn(),
+             (unsigned long)svc.motors[0].getStepsOut(),
+             (unsigned long)svc.motors[1].getStepsOut());
 
     svc.display->print("Self test 2", "Retracting.");
     for (int i = 0; i < svc.num_motors; i++) svc.motors[i].setSpeed(-test_speed);

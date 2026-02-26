@@ -25,6 +25,19 @@ struct DefaultTickEntry {
 // Default table in absolute angles (degrees). This preserves the previous firmware
 // behavior when no calibration is stored, while remaining correct even if the
 // build's LOWEST_ANGLE changes.
+#if defined(BOARD_TYPE) && (BOARD_TYPE == BOARD_TYPE_ARCTIC_CYTRON)
+// On ARCTIC_CYTRON, mechanical home is 30deg (LOWEST_ANGLE), so 30deg must be 0 ticks.
+// Values below are based on the legacy absolute table re-based so that 30deg is 0.
+static constexpr DefaultTickEntry kDefaultTargetTicks[] = {
+    {30, 0},
+    {35, 3900},
+    {40, 7500},
+    {45, 11500},
+    {50, 16500},
+    {55, 20500},
+    {60, 24500},
+};
+#else
 static constexpr DefaultTickEntry kDefaultTargetTicks[] = {
     {10, 0},
     {15, 3000},
@@ -40,6 +53,7 @@ static constexpr DefaultTickEntry kDefaultTargetTicks[] = {
     {65, 42000},
     {70, 47000},
 };
+#endif
 
 static constexpr int kV1FirstAngle = 20;
 static constexpr int kV1LastAngle  = 60;
@@ -189,18 +203,19 @@ bool load_or_default(uint32_t *target_ticks, int target_len) {
     }
 
     if (ver == 2U) {
-        // V2 stores the full tick table. Be tolerant of length changes across firmware versions.
-        if (len < (sizeof(uint32_t) * 2U + sizeof(uint32_t))) {
-            ESP_LOGW(TAG, "Calibration v2 blob too small (len=%u); using defaults", (unsigned)len);
+        // V2 stores the full tick table sized to wallter::kMaxAngles.
+        // If LOWEST_ANGLE/HIGHEST_ANGLE changed across firmware, the stored blob length
+        // will no longer match and the index mapping becomes invalid. Treat as incompatible.
+        if (len != sizeof(CalBlobV2)) {
+            ESP_LOGW(TAG, "Calibration v2 blob incompatible (len=%u expected=%u); using defaults",
+                     (unsigned)len,
+                     (unsigned)sizeof(CalBlobV2));
             derive_entries(target_ticks, target_len);
             return false;
         }
-        size_t count = (len - sizeof(uint32_t) * 2U) / sizeof(uint32_t);
-        const uint32_t *ticks = (const uint32_t *)(buf + sizeof(uint32_t) * 2U);
-        size_t copy_n = count;
-        if (copy_n > (size_t)target_len) copy_n = (size_t)target_len;
-        for (size_t i = 0; i < copy_n; ++i) {
-            target_ticks[i] = ticks[i];
+        const CalBlobV2 *b2 = (const CalBlobV2 *)buf;
+        for (int i = 0; i < target_len; ++i) {
+            target_ticks[i] = b2->ticks[i];
         }
         derive_entries(target_ticks, target_len);
         ESP_LOGI(TAG, "Calibration loaded from NVS (v2)");

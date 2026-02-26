@@ -1,7 +1,11 @@
 #ifndef MOTOR_DRIVER_H
 #define MOTOR_DRIVER_H
 
+#include <atomic>
 #include <stdint.h>
+
+#include "esp_attr.h"
+
 #include "cytron_md.hpp"
 #include <pid.hpp>
 
@@ -29,7 +33,6 @@ class MotorDriver {
     void resetSteps(bool all = true);
 
     // Position tracking
-    void incrementPosition(int32_t delta);
     void setPosition(int32_t pos);
     int32_t getPosition() const;
 

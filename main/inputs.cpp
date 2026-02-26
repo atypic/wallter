@@ -13,6 +13,8 @@
 #include "hal/gpio_ll.h"
 #include "soc/soc_caps.h"
 
+#include "boards.h"
+
 namespace wallter::inputs {
 
 static const char *TAG = "inputs";
@@ -23,11 +25,6 @@ static int g_num_motors = 0;
 static gpio_glitch_filter_handle_t g_btn_extend_filter = nullptr;
 static gpio_glitch_filter_handle_t g_btn_retract_filter = nullptr;
 
-// Optional hardware glitch filters for HAL encoder clock pins.
-#if SOC_GPIO_FLEX_GLITCH_FILTER_NUM > 0
-static gpio_glitch_filter_handle_t g_hal_clk_filters[NUM_MOTORS] = {nullptr};
-#endif
-
 #if CONFIG_WALLTER_HAL_SIM
 static esp_timer_handle_t g_hal_sim_timer = nullptr;
 #endif
@@ -37,8 +34,10 @@ static volatile bool g_retract_event = false;
 static bool g_boot_menu_requested = false;
 static bool g_boot_skip_self_test_requested = false;
 
-// Software edge filter for HAL clocks (aggressive debounce)
-static uint64_t g_last_clk_us[NUM_MOTORS] = {0};
+// Arduino-style hall tick filter (ms gate).
+// We keep the knob in one place by deriving from HAL_CLK_MIN_PULSE_US.
+static constexpr uint32_t HALL_FILTER_MS = (uint32_t)((HAL_CLK_MIN_PULSE_US + 999U) / 1000U);
+static uint32_t g_last_clk_ms[NUM_MOTORS] = {0};
 
 static void IRAM_ATTR isr_button_extend(void *arg) {
     (void)arg;
@@ -52,46 +51,31 @@ static void IRAM_ATTR isr_button_retract(void *arg) {
 
 static void IRAM_ATTR isr_hal_clk(void *arg) {
     int idx = (int)(intptr_t)arg;
-    uint64_t now_us = (uint64_t)esp_timer_get_time();
+    uint32_t now_ms = (uint32_t)((uint64_t)esp_timer_get_time() / 1000ULL);
 
-    // Simple debounce / glitch reject: require a minimum gap between accepted
-    // ticks. We reuse HAL_CLK_MIN_PULSE_US as a min-gap in this mode.
-    uint64_t last_us = g_last_clk_us[idx];
-    if (HAL_CLK_MIN_PULSE_US > 0 && last_us != 0 && (now_us - last_us) < (uint64_t)HAL_CLK_MIN_PULSE_US) {
-        return;
-    }
-    g_last_clk_us[idx] = now_us;
-
-    int32_t spd = g_motors[idx].getSpeed();
-    // If the motor is stopped, ignore any encoder edges (usually noise).
-    if (spd == 0) {
+    if ((unsigned)idx >= (unsigned)g_num_motors) {
         return;
     }
 
-    if (HAL_DIR_FROM_MOTOR) {
-        if (spd < 0) {
-            g_motors[idx].incrementStepIn();
-        } else {
-            g_motors[idx].incrementStepOut();
-        }
+    // Arduino logic:
+    // if (millis() - lastClk[idx] > HALL_FILTER_MS) {
+    //   if (digitalRead(HAL_CNT[idx]) == 0) steps_in++, pos-- else steps_out++, pos++;
+    //   lastClk[idx] = millis();
+    // }
+    uint32_t last_ms = g_last_clk_ms[idx];
+    uint32_t delta_ms = now_ms - last_ms;
+    if (last_ms != 0 && delta_ms <= HALL_FILTER_MS) {
         return;
     }
 
-    // Arduino-style count:
-    // - Interrupt on CLK rising edge
-    // - Sample CNT level to decide direction
-    gpio_num_t sample_pin = (gpio_num_t)(HAL_AB_SWAPPED ? HAL_CLK[idx] : HAL_CNT[idx]);
-    int cnt = gpio_ll_get_level(&GPIO, sample_pin);
-    // Swapping A/B flips direction sense; fold into inversion.
-    if (HAL_CNT_INVERT ^ HAL_AB_SWAPPED) {
-        cnt = !cnt;
-    }
-
+    // Direction is sampled directly from HAL_CNT.
+    int cnt = gpio_ll_get_level(&GPIO, (gpio_num_t)(HAL_CNT[idx]));
     if (cnt == 0) {
         g_motors[idx].incrementStepIn();
     } else {
         g_motors[idx].incrementStepOut();
     }
+    g_last_clk_ms[idx] = now_ms;
 }
 
 static void configure_buttons_gpio() {
@@ -116,7 +100,7 @@ static void configure_buttons_gpio() {
 static void configure_hal_encoder_gpio_and_isrs() {
     // Reset software edge filter baselines.
     for (int i = 0; i < g_num_motors; ++i) {
-        g_last_clk_us[i] = 0;
+        g_last_clk_ms[i] = 0;
     }
 
     gpio_config_t clk = {};
@@ -126,47 +110,11 @@ static void configure_hal_encoder_gpio_and_isrs() {
     clk.pull_down_en = GPIO_PULLDOWN_DISABLE;
     uint64_t mask = 0;
     for (int i = 0; i < g_num_motors; ++i) {
-        unsigned int clk_pin = HAL_AB_SWAPPED ? HAL_CNT[i] : HAL_CLK[i];
+        unsigned int clk_pin = HAL_CLK[i];
         mask |= (1ULL << clk_pin);
     }
     clk.pin_bit_mask = mask;
     gpio_config(&clk);
-
-#if SOC_GPIO_FLEX_GLITCH_FILTER_NUM > 0
-    // Apply a flex glitch filter to each CLK pin to reject short spikes.
-    // This mimics the old Arduino Due "hardware debounce" behavior.
-    // Note: this filters by pulse width (discard pulses shorter than threshold).
-    for (int i = 0; i < g_num_motors; ++i) {
-        unsigned int clk_pin = HAL_AB_SWAPPED ? HAL_CNT[i] : HAL_CLK[i];
-
-        // Clean up any previous filter handle.
-        if (g_hal_clk_filters[i]) {
-            (void)gpio_glitch_filter_disable(g_hal_clk_filters[i]);
-            (void)gpio_del_glitch_filter(g_hal_clk_filters[i]);
-            g_hal_clk_filters[i] = nullptr;
-        }
-
-        if (HAL_CLK_MIN_PULSE_US > 0) {
-            uint32_t thres_ns = (HAL_CLK_MIN_PULSE_US <= (UINT32_MAX / 1000U))
-                                    ? ((uint32_t)HAL_CLK_MIN_PULSE_US * 1000U)
-                                    : UINT32_MAX;
-            gpio_flex_glitch_filter_config_t fcfg = {
-                .clk_src = GLITCH_FILTER_CLK_SRC_DEFAULT,
-                .gpio_num = (gpio_num_t)clk_pin,
-                .window_width_ns = thres_ns,
-                .window_thres_ns = thres_ns,
-            };
-
-            esp_err_t err = gpio_new_flex_glitch_filter(&fcfg, &g_hal_clk_filters[i]);
-            if (err == ESP_OK) {
-                (void)gpio_glitch_filter_enable(g_hal_clk_filters[i]);
-            } else {
-                ESP_LOGW(TAG, "HAL m%d: flex glitch filter unavailable (clk=%u err=%d)", i, clk_pin, (int)err);
-                g_hal_clk_filters[i] = nullptr;
-            }
-        }
-    }
-#endif
 
     gpio_config_t cnt = {};
     cnt.mode = GPIO_MODE_INPUT;
@@ -175,30 +123,27 @@ static void configure_hal_encoder_gpio_and_isrs() {
     cnt.pull_down_en = GPIO_PULLDOWN_DISABLE;
     mask = 0;
     for (int i = 0; i < g_num_motors; ++i) {
-        // Configure the pin we sample for direction (HAL_CNT normally, HAL_CLK if A/B swapped).
-        unsigned int sample_pin = HAL_AB_SWAPPED ? HAL_CLK[i] : HAL_CNT[i];
+        // Configure the pin we sample for direction.
+        unsigned int sample_pin = HAL_CNT[i];
         mask |= (1ULL << sample_pin);
     }
     cnt.pin_bit_mask = mask;
     gpio_config(&cnt);
 
     for (int i = 0; i < g_num_motors; ++i) {
-        unsigned int clk_pin = HAL_AB_SWAPPED ? HAL_CNT[i] : HAL_CLK[i];
-        unsigned int sample_pin = HAL_AB_SWAPPED ? HAL_CLK[i] : HAL_CNT[i];
+        unsigned int clk_pin = HAL_CLK[i];
+        unsigned int sample_pin = HAL_CNT[i];
         ESP_LOGI(TAG,
-                 "HAL m%d: CLK=%u SAMPLE=%u swapped=%d invert=%d dir_from_motor=%d validate=%d min_pulse_us=%u",
+                 "HAL m%d: CLK=%u SAMPLE=%u hall_filter_ms=%u",
                  i,
                  clk_pin,
                  sample_pin,
-                 (int)HAL_AB_SWAPPED,
-                 (int)HAL_CNT_INVERT,
-                 (int)HAL_DIR_FROM_MOTOR,
-                 (int)HAL_VALIDATE_DIR_WITH_MOTOR,
-                 (unsigned)HAL_CLK_MIN_PULSE_US);
+                 (unsigned)HALL_FILTER_MS);
     }
 
+
     for (int i = 0; i < g_num_motors; ++i) {
-        unsigned int clk_pin = HAL_AB_SWAPPED ? HAL_CNT[i] : HAL_CLK[i];
+        unsigned int clk_pin = HAL_CLK[i];
         gpio_isr_handler_add((gpio_num_t)clk_pin, isr_hal_clk, (void *)(intptr_t)i);
     }
 }

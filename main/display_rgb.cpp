@@ -129,13 +129,6 @@ void Display::refresh() {
 void Display::set_refresh_rate(float seconds) { refresh_interval_ms = (uint32_t)(seconds * 1000.0f); }
 void Display::trigger_refresh() { pending_refresh = true; }
 
-void Display::update_new_pin_view(char *new_pin) {
-    snprintf(view_buffers[LCD_NEW_PIN_VIEW][0], 17, "%.*s", 16, "New PIN:");
-    snprintf(view_buffers[LCD_NEW_PIN_VIEW][1], 17, "%.*s", 16, new_pin);
-    // Do not force immediate refresh; respect refresh interval
-    next_view = LCD_NEW_PIN_VIEW;
-}
-
 void Display::update_target_view(float target_angle, uint8_t percent) {
     // Top row: target angle, formatted similar to Arduino version
     snprintf(view_buffers[LCD_TARGET_VIEW][0], 17, "Target:  %.1f", target_angle);
@@ -152,12 +145,6 @@ void Display::update_target_view(float target_angle, uint8_t percent) {
     view_buffers[LCD_TARGET_VIEW][1][16] = '\0';
     // Do not set_view here to avoid forcing refresh each loop
     next_view = LCD_TARGET_VIEW;
-}
-
-void Display::update_lockscreen_view(char *current_pin) {
-    snprintf(view_buffers[LCD_LOCKSCREEN_VIEW][0], 17, "%.*s", 16, "LOCKED");
-    snprintf(view_buffers[LCD_LOCKSCREEN_VIEW][1], 17, "PIN:%.*s", 12, current_pin);
-    next_view = LCD_LOCKSCREEN_VIEW;
 }
 
 void Display::update_homing_view() {

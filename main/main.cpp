@@ -45,7 +45,6 @@ static uint32_t g_target_idx = 0;
 static wallter::calibration::CalMeta g_cal_meta = { (uint8_t)DEFAULT_CAL_MIN_ANGLE, (uint8_t)DEFAULT_CAL_MAX_ANGLE };
 static int g_min_target_idx = 0;
 static int g_max_target_idx = 0;
-static uint32_t g_home_offset_raw_ticks = 0;
 
 static inline uint64_t now_ms() {
     return (uint64_t)(esp_timer_get_time() / 1000ULL);
@@ -53,9 +52,7 @@ static inline uint64_t now_ms() {
 
 static void apply_calibration_meta_and_shift() {
     // Validate and compute indices.
-    // Homing always goes to the physical hard-stop; we no longer use a homing
-    // offset or calibration-table shifting. However, we still honor the stored
-    // min/max angles as *UI/range limits*.
+    // We honor the stored min/max angles as UI/range limits.
     int min_idx = wallter::angle_to_index((int)g_cal_meta.min_angle_deg);
     int max_idx = wallter::angle_to_index((int)g_cal_meta.max_angle_deg);
     if (min_idx < 0) min_idx = 0;
@@ -67,9 +64,6 @@ static void apply_calibration_meta_and_shift() {
         g_cal_meta.max_angle_deg = (uint8_t)DEFAULT_CAL_MAX_ANGLE;
     }
 
-    // No homing offset / no shifting.
-    g_home_offset_raw_ticks = 0;
-
     g_min_target_idx = min_idx;
     g_max_target_idx = max_idx;
 
@@ -77,10 +71,38 @@ static void apply_calibration_meta_and_shift() {
     if ((int)g_target_idx > g_max_target_idx) g_target_idx = (uint32_t)g_max_target_idx;
 }
 
+static void dump_calibration_table() {
+    ESP_LOGI(TAG, "Calibration meta: min=%u max=%u (LOWEST=%d HIGHEST=%d step=%d)",
+             (unsigned)g_cal_meta.min_angle_deg,
+             (unsigned)g_cal_meta.max_angle_deg,
+             (int)LOWEST_ANGLE,
+             (int)HIGHEST_ANGLE,
+             (int)ANGLE_STEP);
+    ESP_LOGI(TAG, "Calibration idx limits: min_idx=%d max_idx=%d max_angles=%d", g_min_target_idx, g_max_target_idx, (int)MAX_ANGLES);
+
+    bool monotonic = true;
+    for (int i = 1; i < MAX_ANGLES; ++i) {
+        if (g_target_ticks[i] < g_target_ticks[i - 1]) {
+            monotonic = false;
+            break;
+        }
+    }
+    if (!monotonic) {
+        ESP_LOGW(TAG, "Calibration table is not monotonic increasing (ticks decreased at some index)");
+    }
+
+    for (int i = 0; i < MAX_ANGLES; ++i) {
+        int angle = LOWEST_ANGLE + i * ANGLE_STEP;
+        ESP_LOGI(TAG, "CAL: idx=%d angle=%d ticks=%lu", i, angle, (unsigned long)g_target_ticks[i]);
+    }
+}
+
 static void load_calibration_all() {
     wallter::calibration::load_or_default(g_target_ticks, MAX_ANGLES);
     (void)wallter::calibration::load_meta_or_default(g_cal_meta);
     apply_calibration_meta_and_shift();
+
+    dump_calibration_table();
 
     // Always start at the configured minimum angle on boot/reload.
     // (Calibration mode may leave target_idx pointing at the last visited step.)
@@ -108,7 +130,6 @@ extern "C" void app_main(void) {
     svc.max_angles = MAX_ANGLES;
     svc.target_idx = &g_target_idx;
     svc.cal_meta = &g_cal_meta;
-    svc.home_offset_raw_ticks = &g_home_offset_raw_ticks;
     svc.read_extend_pressed = &wallter::inputs::read_extend_pressed;
     svc.read_retract_pressed = &wallter::inputs::read_retract_pressed;
     svc.set_current_command = &wallter::control::set_command;
@@ -146,7 +167,7 @@ extern "C" void app_main(void) {
 
         // Re-load calibration after a calibration run (ensures interpolation is applied consistently)
         load_calibration_all();
-        wallter::control::update_limits(g_min_target_idx, g_max_target_idx, g_home_offset_raw_ticks);
+        wallter::control::update_limits(g_min_target_idx, g_max_target_idx);
         wallter::inputs::clear_button_events();
         wallter::inputs::clear_boot_menu_requested();
         wallter::inputs::clear_skip_self_test_requested();
@@ -156,9 +177,8 @@ extern "C" void app_main(void) {
         } else {
             ESP_LOGI(TAG, "Normal boot: running self-test");
             wallter::modes::run_self_test_sequence(svc);
-            // Self-test moves motors directly; reset counters/positions before homing.
-            wallter::control::reset_tick_counters(0, true);
-            wallter::control::reset_motor_positions();
+            // Self-test drives motors directly, but encoder ISRs still maintain MotorDriver
+            // position. Homing should establish the reference; do not zero positions here.
         }
 
         wallter::inputs::clear_button_events();
@@ -183,16 +203,21 @@ extern "C" void app_main(void) {
 
         wallter::control::iterate();
 
-        // Periodic logging and stall checks, update target view
+        // Periodic logging and stall checks
         wallter::control::print_state(500);
-        uint32_t target_ticks = g_target_ticks[g_target_idx];
-        int32_t pos           = wallter::control::master_position();
-        int32_t start_pos     = wallter::control::progress_start_ticks();
-        uint8_t pct = wallter::control::compute_progress_percent(pos, start_pos, (int32_t)target_ticks);
-        float tgt_angle = (g_target_idx == 0) ? LOWEST_ANGLE : (g_target_idx * ANGLE_STEP + LOWEST_ANGLE);
-        display.update_target_view(tgt_angle, pct);
-        wallter::ble_ota::set_current_angle_deg(tgt_angle);
-        wallter::control::error_check_motor_positions();
+        if (wallter::control::command() == wallter::CMD_HOME) {
+            // Don't let target view override the homing view.
+            display.update_homing_view();
+        } else {
+            uint32_t target_ticks = g_target_ticks[g_target_idx];
+            int32_t pos           = wallter::control::master_position();
+            int32_t start_pos     = wallter::control::progress_start_ticks();
+            uint8_t pct = wallter::control::compute_progress_percent(pos, start_pos, (int32_t)target_ticks);
+            float tgt_angle = (g_target_idx == 0) ? LOWEST_ANGLE : (g_target_idx * ANGLE_STEP + LOWEST_ANGLE);
+            display.update_target_view(tgt_angle, pct);
+            wallter::ble_ota::set_current_angle_deg(tgt_angle);
+            wallter::control::error_check_motor_positions();
+        }
         display.refresh();
         vTaskDelay(pdMS_TO_TICKS(200));
     }
@@ -225,10 +250,10 @@ static void setup() {
     ctx.target_idx = &g_target_idx;
     ctx.min_target_idx = g_min_target_idx;
     ctx.max_target_idx = g_max_target_idx;
-    ctx.home_offset_raw_ticks = g_home_offset_raw_ticks;
     wallter::control::init(ctx);
 
-    // Reset counters and positions like Arduino setup()
+    // Reset counters and positions like Arduino setup().
+    // Note: position will be re-zeroed by a successful homing sequence.
     wallter::control::reset_tick_counters(0, true);
     wallter::control::reset_motor_positions();
 
@@ -243,7 +268,10 @@ static void setup() {
     }
 
     g_target_idx = (uint32_t)g_min_target_idx;
-    wallter::control::set_command(wallter::CMD_HOME);
+
+    // Leave command STOP here. Boot flow will run self-test/menu first, then
+    // explicitly enter homing once those routines complete.
+    wallter::control::set_command(wallter::CMD_STOP);
 
     // Button ISRs configured in configure_gpio().
 
