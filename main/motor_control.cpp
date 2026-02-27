@@ -6,6 +6,7 @@
 #include "display.hpp"
 #include "motordriver.hpp"
 #include "buttons.hpp"
+#include "inputs.hpp"
 
 #include "esp_log.h"
 #include "esp_timer.h"
@@ -89,6 +90,7 @@ void reset_idle_timer() {
 
 void reset_tick_counters(uint32_t m, bool all) {
     (void)m;
+    wallter::inputs::reset_encoder_counts();
     if (all) {
         for (int j = 0; j < g_ctx.num_motors; j++) {
             g_ctx.motors[j].resetSteps(true);
@@ -365,6 +367,9 @@ static int32_t get_master_motor_speed() {
 }
 
 void iterate() {
+    // Pull PCNT hardware counts into MotorDriver step/position counters.
+    wallter::inputs::poll_encoder_counts();
+
     // Update master movement latch from encoder steps.
     {
         uint32_t si = g_ctx.motors[g_ctx.master_motor_index].getStepsIn();
@@ -604,30 +609,16 @@ void handle_buttons(bool extend_event, bool retract_event) {
     uint32_t new_target_pos = g_ctx.target_ticks[new_idx];
     int32_t pos = g_ctx.motors[g_ctx.master_motor_index].getPosition();
 
-    if (g_current_cmd == wallter::CMD_STOP) {
-        int decided = decide_command_for_target(pos,
-                                               new_target_pos,
-                                               wallter::CMD_STOP,
-                                               wallter::CMD_EXTEND,
-                                               wallter::CMD_RETRACT,
-                                               wallter::CMD_HOME);
-        set_command(decided);
-        *g_ctx.target_idx = (uint32_t)new_idx;
-        return;
-    }
-
-    if (!is_target_change_permitted(pos, new_target_pos, g_current_cmd, wallter::CMD_EXTEND, wallter::CMD_RETRACT)) {
-        g_ctx.display->show_short_message(const_cast<char *>("ERROR:"), const_cast<char *>("LOWERING"), 2000);
-        return;
-    }
-
-    ESP_LOGI(TAG, "Change accepted.");
+    // Accept target changes even if it requires reversing direction.
+    // This avoids getting "stuck" extending at a high target if the user decides to retract.
     *g_ctx.target_idx = (uint32_t)new_idx;
-
-    if (new_idx == 0) {
-        set_command(wallter::CMD_RETRACT);
-    }
-
+    int decided = decide_command_for_target(pos,
+                                           new_target_pos,
+                                           wallter::CMD_STOP,
+                                           wallter::CMD_EXTEND,
+                                           wallter::CMD_RETRACT,
+                                           wallter::CMD_HOME);
+    set_command(decided);
     g_ctx.display->trigger_refresh();
 }
 

@@ -30,12 +30,14 @@ struct DefaultTickEntry {
 // Values below are based on the legacy absolute table re-based so that 30deg is 0.
 static constexpr DefaultTickEntry kDefaultTargetTicks[] = {
     {30, 0},
-    {35, 3900},
-    {40, 7500},
-    {45, 11500},
-    {50, 16500},
-    {55, 20500},
-    {60, 24500},
+    {35, 5026},
+    {40, 10274},
+    {45, 15425},
+    {50, 20561},
+    {55, 25792},
+    {60, 30852},
+    {65, 35000},
+    {70, 40000},
 };
 #else
 static constexpr DefaultTickEntry kDefaultTargetTicks[] = {

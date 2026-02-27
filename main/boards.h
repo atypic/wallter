@@ -122,20 +122,20 @@ static const bool g_has_keypad = false;
 // This board is mechanically constructed so the fully retracted hard-stop is
 // the lowest usable angle.
 #define LOWEST_ANGLE 30
-#define HIGHEST_ANGLE 60
+#define HIGHEST_ANGLE 70
 #define ANGLE_STEP 5
 
 // Default calibration range (used when NVS has no calibration meta stored).
 // Lowest usable is the mechanical home on this hardware.
 #define DEFAULT_CAL_MIN_ANGLE 30
-#define DEFAULT_CAL_MAX_ANGLE 60
+#define DEFAULT_CAL_MAX_ANGLE 70
 
 #define MASTER_MOTOR 0
 
 #define ACCEL_STEP 1
 #define MINSPEED (220)
 #define MAXSPEED (245)
-#define MASTER_MAX (236)
+#define MASTER_MAX (230)
 
 #define NUM_MOTORS 2
 

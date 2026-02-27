@@ -153,6 +153,10 @@ void run_calibration_mode(Services &svc) {
         }
 
         while (1) {
+            // This mode drives motors directly (no control loop), so we must poll PCNT
+            // to transfer encoder counts into MotorDriver counters.
+            wallter::inputs::poll_encoder_counts();
+
             // Render
             const char deg = (char)0xDF;
             char line1[17];
@@ -219,6 +223,10 @@ void run_calibration_mode(Services &svc) {
 
         // Per-angle loop: manual jog
         while (1) {
+            // This mode drives motors directly (no control loop), so we must poll PCNT
+            // to transfer encoder counts into MotorDriver counters.
+            wallter::inputs::poll_encoder_counts();
+
             bool extend = svc.read_extend_pressed();
             bool retract = svc.read_retract_pressed();
             bool both = extend && retract;
@@ -325,6 +333,22 @@ void run_self_test_sequence(Services &svc) {
     const int test_speed = MINSPEED;
     const int test_time  = 1000;
     const int settle_time = 250;
+    static constexpr uint32_t kSelfTestExpectedTicks = 100U;
+    static constexpr uint32_t kSelfTestAllowedMargin = 20U;
+    static constexpr uint32_t kSelfTestMinTicks = kSelfTestExpectedTicks - kSelfTestAllowedMargin;
+
+    auto wait_with_encoder_poll = [&](uint32_t total_ms) {
+        // Self-test drives motors directly (no control loop), so we must poll PCNT
+        // to transfer encoder counts into MotorDriver counters.
+        static constexpr uint32_t kChunkMs = 25;
+        uint32_t remaining = total_ms;
+        while (remaining > 0) {
+            uint32_t d = (remaining > kChunkMs) ? kChunkMs : remaining;
+            vTaskDelay(pdMS_TO_TICKS(d));
+            wallter::inputs::poll_encoder_counts();
+            remaining -= d;
+        }
+    };
 
     ESP_LOGI(TAG, "Self-test started.");
     ESP_LOGI(TAG, "Init pos=[%ld %ld] si=[%lu %lu] so=[%lu %lu]",
@@ -341,7 +365,7 @@ void run_self_test_sequence(Services &svc) {
     ESP_LOGI(TAG, "Retract phase start, speed=%d", test_speed);
     for (int i = 0; i < svc.num_motors; i++) svc.motors[i].setSpeed(-test_speed);
     ESP_LOGI(TAG, "Retract phase running...");
-    vTaskDelay(pdMS_TO_TICKS(test_time + 500));
+    wait_with_encoder_poll((uint32_t)test_time + 500U);
 
     ESP_LOGI(TAG, "Retract done. si=[%lu %lu] so=[%lu %lu]",
              (unsigned long)svc.motors[0].getStepsIn(),
@@ -353,7 +377,7 @@ void run_self_test_sequence(Services &svc) {
     // With HAL_VALIDATE_DIR_WITH_MOTOR enabled, immediate reversals can drop
     // ticks while the mechanism is still moving in the previous direction.
     for (int i = 0; i < svc.num_motors; i++) svc.motors[i].setSpeed(0);
-    vTaskDelay(pdMS_TO_TICKS(settle_time));
+    wait_with_encoder_poll((uint32_t)settle_time);
 
     svc.reset_tick_counters(0, true);
     ESP_LOGI(TAG, "Counters reset. si=[%lu %lu] so=[%lu %lu]",
@@ -364,7 +388,7 @@ void run_self_test_sequence(Services &svc) {
 
     for (int i = 0; i < svc.num_motors; i++) svc.motors[i].setSpeed(test_speed);
     ESP_LOGI(TAG, "Extend phase start, speed=%d", test_speed);
-    vTaskDelay(pdMS_TO_TICKS(test_time));
+    wait_with_encoder_poll((uint32_t)test_time);
 
     ESP_LOGI(TAG, "Extend done. si=[%lu %lu] so=[%lu %lu]",
              (unsigned long)svc.motors[0].getStepsIn(),
@@ -376,13 +400,15 @@ void run_self_test_sequence(Services &svc) {
     for (int i = 0; i < svc.num_motors; i++) svc.motors[i].setSpeed(0);
 
     for (int i = 0; i < svc.num_motors; i++) {
-        if (svc.motors[i].getStepsOut() < 100U) {
-            ESP_LOGE(TAG, "Self-test failed: motor %d si:%d so:%d",
+        uint32_t so = svc.motors[i].getStepsOut();
+        if (so < kSelfTestMinTicks) {
+            ESP_LOGE(TAG, "Self-test failed: motor %d so=%lu (min=%lu) si=%lu",
                      i,
-                     (int)svc.motors[i].getStepsIn(),
-                     (int)svc.motors[i].getStepsOut());
+                     (unsigned long)so,
+                     (unsigned long)kSelfTestMinTicks,
+                     (unsigned long)svc.motors[i].getStepsIn());
             char tbuf[32];
-            snprintf(tbuf, sizeof(tbuf), "M:%d SO:%d", i, (int)svc.motors[i].getStepsOut());
+            snprintf(tbuf, sizeof(tbuf), "M:%d SO:%lu", i, (unsigned long)so);
             svc.display->print("SELF TEST FAILED", tbuf);
             svc.panicf("M%d NO OUT", i);
         }
@@ -390,7 +416,7 @@ void run_self_test_sequence(Services &svc) {
 
     // Stop + settle before resetting counters and reversing direction.
     // This matches the first phase behavior and keeps per-phase tick checks isolated.
-    vTaskDelay(pdMS_TO_TICKS(settle_time));
+    wait_with_encoder_poll((uint32_t)settle_time);
     svc.reset_tick_counters(0, true);
     ESP_LOGI(TAG, "Counters reset (before retract2). si=[%lu %lu] so=[%lu %lu]",
              (unsigned long)svc.motors[0].getStepsIn(),
@@ -400,7 +426,7 @@ void run_self_test_sequence(Services &svc) {
 
     svc.display->print("Self test 2", "Retracting.");
     for (int i = 0; i < svc.num_motors; i++) svc.motors[i].setSpeed(-test_speed);
-    vTaskDelay(pdMS_TO_TICKS(test_time));
+    wait_with_encoder_poll((uint32_t)test_time);
 
     ESP_LOGI(TAG, "Retract2 done. si=[%lu %lu] so=[%lu %lu]",
              (unsigned long)svc.motors[0].getStepsIn(),
@@ -412,13 +438,15 @@ void run_self_test_sequence(Services &svc) {
     for (int i = 0; i < svc.num_motors; i++) svc.motors[i].setSpeed(0);
 
     for (int i = 0; i < svc.num_motors; i++) {
-        if (svc.motors[i].getStepsIn() < 100U) {
-            ESP_LOGE(TAG, "Self-test failed: motor %d si:%d so:%d",
+        uint32_t si = svc.motors[i].getStepsIn();
+        if (si < kSelfTestMinTicks) {
+            ESP_LOGE(TAG, "Self-test failed: motor %d si=%lu (min=%lu) so=%lu",
                      i,
-                     (int)svc.motors[i].getStepsIn(),
-                     (int)svc.motors[i].getStepsOut());
+                     (unsigned long)si,
+                     (unsigned long)kSelfTestMinTicks,
+                     (unsigned long)svc.motors[i].getStepsOut());
             char tbuf[32];
-            snprintf(tbuf, sizeof(tbuf), "M:%d SI:%d", i, (int)svc.motors[i].getStepsIn());
+            snprintf(tbuf, sizeof(tbuf), "M:%d SI:%lu", i, (unsigned long)si);
             svc.display->print("SELF TEST FAILED:", tbuf);
             svc.panicf("M%d NO IN", i);
         }
@@ -430,9 +458,13 @@ void run_self_test_sequence(Services &svc) {
     for (int i = 0; i < svc.num_motors; ++i) {
         uint32_t so = svc.motors[i].getStepsOut();
         uint32_t si = svc.motors[i].getStepsIn();
+        // Only warn if we're accumulating a meaningful amount of ticks in BOTH directions
+        // within the same phase window. In a pure extend phase, si should be ~0; in a pure
+        // retract phase, so should be ~0.
+        uint32_t mn = (so < si) ? so : si;
         uint32_t mx = (so > si) ? so : si;
-        uint32_t diff = (so > si) ? (so - si) : (si - so);
-        if (mx > 0U && diff * 100U > mx * 60U) {
+        uint32_t diff = mx - mn;
+        if (mn >= (kSelfTestMinTicks / 2U) && diff * 100U > mx * 60U) {
             ESP_LOGW(TAG, "Self-test warning: motor %d tick mismatch si=%lu so=%lu",
                      i,
                      (unsigned long)si,
@@ -635,6 +667,8 @@ void run_jog_mode(Services &svc) {
         }
 
         while (1) {
+            wallter::inputs::poll_encoder_counts();
+
             char l1[17];
             snprintf(l1, sizeof(l1), ">Jog %s", sel_label(sel));
             svc.display->print(l1, "R=Next E=OK");
@@ -668,6 +702,10 @@ void run_jog_mode(Services &svc) {
     uint64_t last_shown_ms = 0;
 
     while (1) {
+        // This mode drives motors directly (no control loop), so we must poll PCNT
+        // to transfer encoder counts into MotorDriver counters.
+        wallter::inputs::poll_encoder_counts();
+
         bool extend = svc.read_extend_pressed();
         bool retract = svc.read_retract_pressed();
         bool both = extend && retract;

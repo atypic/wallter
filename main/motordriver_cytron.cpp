@@ -156,7 +156,9 @@ void MotorDriver::pidConfigureLimits(double outMin, double outMax) {
 }
 void MotorDriver::pidSetSampleTime(uint16_t /*ms*/) { /* espp::Pid tracks dt internally */ }
 void MotorDriver::pidStart() { /* no-op */ }
-void MotorDriver::pidReset() { pid.clear(); }
+void MotorDriver::pidReset() {
+    pid.clear();
+}
 
 int32_t MotorDriver::computeFollow(bool reverse,
                                    bool accel_phase,
@@ -174,5 +176,6 @@ int32_t MotorDriver::computeFollow(bool reverse,
     }
     float error = (float)(pid_setpoint - pid_input);
     pid_output = (double)pid.update(error);
+
     return reverse ? (int32_t)pid_output * -1 : (int32_t)pid_output;
 }

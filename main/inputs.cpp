@@ -7,11 +7,14 @@
 
 #include "driver/gpio.h"
 #include "driver/gpio_filter.h"
+#include "driver/pulse_cnt.h"
 #include "esp_log.h"
 #include "esp_attr.h"
 #include "esp_timer.h"
 #include "hal/gpio_ll.h"
 #include "soc/soc_caps.h"
+
+#include <stdint.h>
 
 #include "boards.h"
 
@@ -36,8 +39,12 @@ static bool g_boot_skip_self_test_requested = false;
 
 // Arduino-style hall tick filter (ms gate).
 // We keep the knob in one place by deriving from HAL_CLK_MIN_PULSE_US.
-static constexpr uint32_t HALL_FILTER_MS = (uint32_t)((HAL_CLK_MIN_PULSE_US + 999U) / 1000U);
-static uint32_t g_last_clk_ms[NUM_MOTORS] = {0};
+// NOTE: With PCNT we don't do a software min-gap gate here; the peripheral counts
+// pulses directly and samples the direction control at the pulse edge.
+
+static pcnt_unit_handle_t g_pcnt_units[NUM_MOTORS] = {nullptr};
+static pcnt_channel_handle_t g_pcnt_channels[NUM_MOTORS] = {nullptr};
+static int32_t g_pcnt_last_count[NUM_MOTORS] = {0};
 
 static void IRAM_ATTR isr_button_extend(void *arg) {
     (void)arg;
@@ -49,33 +56,63 @@ static void IRAM_ATTR isr_button_retract(void *arg) {
     g_retract_event = (gpio_ll_get_level(&GPIO, (gpio_num_t)BUTTON_RETRACT_PIN) == 0);
 }
 
-static void IRAM_ATTR isr_hal_clk(void *arg) {
-    int idx = (int)(intptr_t)arg;
-    uint32_t now_ms = (uint32_t)((uint64_t)esp_timer_get_time() / 1000ULL);
+static void configure_hal_pcnt() {
+#if SOC_PCNT_SUPPORTED
+    // Create one PCNT unit per motor.
+    // HAL_CLK is the pulse input (we count rising edges only).
+    // HAL_CNT is the level input (direction control sampled at the pulse edge).
+    for (int i = 0; i < g_num_motors; ++i) {
+        if (g_pcnt_units[i]) {
+            continue;
+        }
 
-    if ((unsigned)idx >= (unsigned)g_num_motors) {
-        return;
-    }
+        pcnt_unit_config_t unit_cfg = {};
+        unit_cfg.low_limit = -32768;
+        unit_cfg.high_limit = 32767;
+    // Enable driver-managed accumulation on overflow so the effective count
+    // range extends beyond the 16-bit hardware counter.
+    unit_cfg.flags.accum_count = 1;
+        ESP_ERROR_CHECK(pcnt_new_unit(&unit_cfg, &g_pcnt_units[i]));
 
-    // Arduino logic:
-    // if (millis() - lastClk[idx] > HALL_FILTER_MS) {
-    //   if (digitalRead(HAL_CNT[idx]) == 0) steps_in++, pos-- else steps_out++, pos++;
-    //   lastClk[idx] = millis();
-    // }
-    uint32_t last_ms = g_last_clk_ms[idx];
-    uint32_t delta_ms = now_ms - last_ms;
-    if (last_ms != 0 && delta_ms <= HALL_FILTER_MS) {
-        return;
-    }
+    // Enable watch points at the low/high limits. These are required for
+    // the driver to detect overflows and maintain the accumulated value.
+    ESP_ERROR_CHECK(pcnt_unit_add_watch_point(g_pcnt_units[i], unit_cfg.low_limit));
+    ESP_ERROR_CHECK(pcnt_unit_add_watch_point(g_pcnt_units[i], unit_cfg.high_limit));
 
-    // Direction is sampled directly from HAL_CNT.
-    int cnt = gpio_ll_get_level(&GPIO, (gpio_num_t)(HAL_CNT[idx]));
-    if (cnt == 0) {
-        g_motors[idx].incrementStepIn();
-    } else {
-        g_motors[idx].incrementStepOut();
+        pcnt_chan_config_t chan_cfg = {};
+        chan_cfg.edge_gpio_num = (gpio_num_t)HAL_CLK[i];
+        chan_cfg.level_gpio_num = (gpio_num_t)HAL_CNT[i];
+        ESP_ERROR_CHECK(pcnt_new_channel(g_pcnt_units[i], &chan_cfg, &g_pcnt_channels[i]));
+
+        // Count on rising edge only.
+        ESP_ERROR_CHECK(pcnt_channel_set_edge_action(g_pcnt_channels[i],
+                                                     PCNT_CHANNEL_EDGE_ACTION_INCREASE,
+                                                     PCNT_CHANNEL_EDGE_ACTION_HOLD));
+
+        // Map HAL_CNT to direction:
+        // - HAL_CNT==0 -> step IN  (position--)
+        // - HAL_CNT==1 -> step OUT (position++)
+        // Base edge action is INCREASE; invert it when HAL_CNT is low.
+        ESP_ERROR_CHECK(pcnt_channel_set_level_action(g_pcnt_channels[i],
+                                                      PCNT_CHANNEL_LEVEL_ACTION_INVERSE,
+                                                      PCNT_CHANNEL_LEVEL_ACTION_KEEP));
+
+        // Optional glitch filter: keep conservative (short spikes only).
+        // If you want stronger filtering, tune this value.
+        pcnt_glitch_filter_config_t filter_cfg = {};
+        filter_cfg.max_glitch_ns = 1000; // 1us
+        (void)pcnt_unit_set_glitch_filter(g_pcnt_units[i], &filter_cfg);
+
+        ESP_ERROR_CHECK(pcnt_unit_enable(g_pcnt_units[i]));
+        ESP_ERROR_CHECK(pcnt_unit_clear_count(g_pcnt_units[i]));
+        ESP_ERROR_CHECK(pcnt_unit_start(g_pcnt_units[i]));
+        g_pcnt_last_count[i] = 0;
+
+        ESP_LOGI(TAG, "HAL PCNT m%d: CLK=%u CNT=%u", i, (unsigned)HAL_CLK[i], (unsigned)HAL_CNT[i]);
     }
-    g_last_clk_ms[idx] = now_ms;
+#else
+    ESP_LOGW(TAG, "PCNT not supported on this target; encoder counting disabled");
+#endif
 }
 
 static void configure_buttons_gpio() {
@@ -98,14 +135,9 @@ static void configure_buttons_gpio() {
 }
 
 static void configure_hal_encoder_gpio_and_isrs() {
-    // Reset software edge filter baselines.
-    for (int i = 0; i < g_num_motors; ++i) {
-        g_last_clk_ms[i] = 0;
-    }
-
     gpio_config_t clk = {};
     clk.mode = GPIO_MODE_INPUT;
-    clk.intr_type = GPIO_INTR_POSEDGE;
+    clk.intr_type = GPIO_INTR_DISABLE;
     clk.pull_up_en = GPIO_PULLUP_ENABLE;
     clk.pull_down_en = GPIO_PULLDOWN_DISABLE;
     uint64_t mask = 0;
@@ -130,22 +162,50 @@ static void configure_hal_encoder_gpio_and_isrs() {
     cnt.pin_bit_mask = mask;
     gpio_config(&cnt);
 
-    for (int i = 0; i < g_num_motors; ++i) {
-        unsigned int clk_pin = HAL_CLK[i];
-        unsigned int sample_pin = HAL_CNT[i];
-        ESP_LOGI(TAG,
-                 "HAL m%d: CLK=%u SAMPLE=%u hall_filter_ms=%u",
-                 i,
-                 clk_pin,
-                 sample_pin,
-                 (unsigned)HALL_FILTER_MS);
-    }
+    // Use PCNT for counting instead of GPIO ISRs.
+    configure_hal_pcnt();
+}
 
-
-    for (int i = 0; i < g_num_motors; ++i) {
-        unsigned int clk_pin = HAL_CLK[i];
-        gpio_isr_handler_add((gpio_num_t)clk_pin, isr_hal_clk, (void *)(intptr_t)i);
+void poll_encoder_counts() {
+#if SOC_PCNT_SUPPORTED
+    if (!g_motors || g_num_motors <= 0) {
+        return;
     }
+    for (int i = 0; i < g_num_motors; ++i) {
+        if (!g_pcnt_units[i]) {
+            continue;
+        }
+        int count = 0;
+        if (pcnt_unit_get_count(g_pcnt_units[i], &count) != ESP_OK) {
+            continue;
+        }
+        // With accum_count enabled, pcnt_unit_get_count() returns an extended count
+        // that won't wrap at 16-bit limits.
+        int32_t cur = (int32_t)count;
+        int32_t delta = (int32_t)(cur - g_pcnt_last_count[i]);
+        if (delta > 0) {
+            for (int s = 0; s < delta; ++s) {
+                g_motors[i].incrementStepOut();
+            }
+        } else if (delta < 0) {
+            for (int s = 0; s < -delta; ++s) {
+                g_motors[i].incrementStepIn();
+            }
+        }
+        g_pcnt_last_count[i] = cur;
+    }
+#endif
+}
+
+void reset_encoder_counts() {
+#if SOC_PCNT_SUPPORTED
+    for (int i = 0; i < g_num_motors; ++i) {
+        g_pcnt_last_count[i] = 0;
+        if (g_pcnt_units[i]) {
+            (void)pcnt_unit_clear_count(g_pcnt_units[i]);
+        }
+    }
+#endif
 }
 
 #if CONFIG_WALLTER_HAL_SIM
