@@ -289,7 +289,7 @@ static int gatt_access_ctrl(uint16_t /*conn_handle*/, uint16_t /*attr_handle*/,
             esp_restart();
             return 0;
         default:
-            ESP_LOGW(TAG, "CTRL: unknown op 0x%02x", buf[0]);
+            ESP_LOGW(TAG, "ctrl unknown op 0x%02x", buf[0]);
             return BLE_ATT_ERR_UNLIKELY;
     }
 }

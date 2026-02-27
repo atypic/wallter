@@ -19,7 +19,7 @@
 
 namespace wallter::control {
 
-static const char *TAG = "control";
+static const char *TAG = "motor_ctl";
 
 static Context g_ctx;
 
@@ -143,7 +143,7 @@ void panicf(const char *fmt, ...) {
         vTaskDelay(pdMS_TO_TICKS(50));
     }
 
-    ESP_LOGE(TAG, "PANIC: %s", buf);
+    ESP_LOGE(TAG, "panic: %s", buf);
     while (1) {
         g_ctx.display->refresh();
         vTaskDelay(pdMS_TO_TICKS(1000));

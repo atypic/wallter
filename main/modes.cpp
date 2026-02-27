@@ -327,7 +327,7 @@ void run_self_test_sequence(Services &svc) {
     const int settle_time = 250;
 
     ESP_LOGI(TAG, "Self-test started.");
-    ESP_LOGI(TAG, "ST: init pos=[%ld %ld] si=[%lu %lu] so=[%lu %lu]",
+    ESP_LOGI(TAG, "Init pos=[%ld %ld] si=[%lu %lu] so=[%lu %lu]",
              (long)svc.motors[0].getPosition(),
              (long)svc.motors[1].getPosition(),
              (unsigned long)svc.motors[0].getStepsIn(),
@@ -338,12 +338,12 @@ void run_self_test_sequence(Services &svc) {
     svc.display->print("Self test 1", "Extending.");
 
     // Retract then extend
-    ESP_LOGI(TAG, "ST: retract phase start, speed=%d", test_speed);
+    ESP_LOGI(TAG, "Retract phase start, speed=%d", test_speed);
     for (int i = 0; i < svc.num_motors; i++) svc.motors[i].setSpeed(-test_speed);
-    ESP_LOGI(TAG, "ST: retract phase running...");
+    ESP_LOGI(TAG, "Retract phase running...");
     vTaskDelay(pdMS_TO_TICKS(test_time + 500));
 
-    ESP_LOGI(TAG, "ST: retract done. si=[%lu %lu] so=[%lu %lu]",
+    ESP_LOGI(TAG, "Retract done. si=[%lu %lu] so=[%lu %lu]",
              (unsigned long)svc.motors[0].getStepsIn(),
              (unsigned long)svc.motors[1].getStepsIn(),
              (unsigned long)svc.motors[0].getStepsOut(),
@@ -356,17 +356,17 @@ void run_self_test_sequence(Services &svc) {
     vTaskDelay(pdMS_TO_TICKS(settle_time));
 
     svc.reset_tick_counters(0, true);
-    ESP_LOGI(TAG, "ST: counters reset. si=[%lu %lu] so=[%lu %lu]",
+    ESP_LOGI(TAG, "Counters reset. si=[%lu %lu] so=[%lu %lu]",
              (unsigned long)svc.motors[0].getStepsIn(),
              (unsigned long)svc.motors[1].getStepsIn(),
              (unsigned long)svc.motors[0].getStepsOut(),
              (unsigned long)svc.motors[1].getStepsOut());
 
     for (int i = 0; i < svc.num_motors; i++) svc.motors[i].setSpeed(test_speed);
-    ESP_LOGI(TAG, "ST: extend phase start, speed=%d", test_speed);
+    ESP_LOGI(TAG, "Extend phase start, speed=%d", test_speed);
     vTaskDelay(pdMS_TO_TICKS(test_time));
 
-    ESP_LOGI(TAG, "ST: extend done. si=[%lu %lu] so=[%lu %lu]",
+    ESP_LOGI(TAG, "Extend done. si=[%lu %lu] so=[%lu %lu]",
              (unsigned long)svc.motors[0].getStepsIn(),
              (unsigned long)svc.motors[1].getStepsIn(),
              (unsigned long)svc.motors[0].getStepsOut(),
@@ -392,7 +392,7 @@ void run_self_test_sequence(Services &svc) {
     // This matches the first phase behavior and keeps per-phase tick checks isolated.
     vTaskDelay(pdMS_TO_TICKS(settle_time));
     svc.reset_tick_counters(0, true);
-    ESP_LOGI(TAG, "ST: counters reset (before retract2). si=[%lu %lu] so=[%lu %lu]",
+    ESP_LOGI(TAG, "Counters reset (before retract2). si=[%lu %lu] so=[%lu %lu]",
              (unsigned long)svc.motors[0].getStepsIn(),
              (unsigned long)svc.motors[1].getStepsIn(),
              (unsigned long)svc.motors[0].getStepsOut(),
@@ -402,7 +402,7 @@ void run_self_test_sequence(Services &svc) {
     for (int i = 0; i < svc.num_motors; i++) svc.motors[i].setSpeed(-test_speed);
     vTaskDelay(pdMS_TO_TICKS(test_time));
 
-    ESP_LOGI(TAG, "ST: retract2 done. si=[%lu %lu] so=[%lu %lu]",
+    ESP_LOGI(TAG, "Retract2 done. si=[%lu %lu] so=[%lu %lu]",
              (unsigned long)svc.motors[0].getStepsIn(),
              (unsigned long)svc.motors[1].getStepsIn(),
              (unsigned long)svc.motors[0].getStepsOut(),

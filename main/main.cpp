@@ -93,7 +93,7 @@ static void dump_calibration_table() {
 
     for (int i = 0; i < MAX_ANGLES; ++i) {
         int angle = LOWEST_ANGLE + i * ANGLE_STEP;
-        ESP_LOGI(TAG, "CAL: idx=%d angle=%d ticks=%lu", i, angle, (unsigned long)g_target_ticks[i]);
+        ESP_LOGI(TAG, "Cal table: idx=%d angle=%d ticks=%lu", i, angle, (unsigned long)g_target_ticks[i]);
     }
 }
 
