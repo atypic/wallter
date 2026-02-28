@@ -22,6 +22,10 @@ CI builds produce:
 - `build/wallter.bin`
 - `build/wallter.bin.sha256` (a text file containing the SHA-256 of the `.bin`)
 
+On tags matching `v*`, CI also uploads a convenience OTA asset to the GitHub Release:
+- `wallter-ota.bin`
+- `wallter-ota.bin.sha256`
+
 On tags matching `v*`, CI also produces a flashable bundle:
 - `wallter-esp32s3-flashable-<tag>.zip` (bootloader + partition table + app + flasher args)
 

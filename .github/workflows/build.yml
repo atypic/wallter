@@ -33,6 +33,13 @@ jobs:
         run: |
           sha256sum build/wallter.bin > build/wallter.bin.sha256
 
+      - name: Prepare OTA release binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp build/wallter.bin build/wallter-ota.bin
+          sha256sum build/wallter-ota.bin > build/wallter-ota.bin.sha256
+
       - name: Package flashable bundle
         shell: bash
         run: |
@@ -78,6 +85,8 @@ jobs:
           path: |
             build/wallter.bin
             build/wallter.bin.sha256
+            build/wallter-ota.bin
+            build/wallter-ota.bin.sha256
             build/wallter-esp32s3-flashable*.zip
 
       - name: Upload to GitHub Release
@@ -85,6 +94,8 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: |
+            build/wallter-ota.bin
+            build/wallter-ota.bin.sha256
             build/wallter.bin
             build/wallter.bin.sha256
             build/wallter-esp32s3-flashable-${{ github.ref_name }}.zip
