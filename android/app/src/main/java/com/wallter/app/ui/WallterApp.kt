@@ -191,10 +191,10 @@ private fun ControlSection(
         Text("Current: ${angleDeg?.let { "${it.toInt()}°" } ?: "—"}")
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             Button(onClick = onUp, enabled = enabled, modifier = Modifier.weight(1f)) {
-                Text("Up")
+                Text("Down")
             }
             Button(onClick = onDown, enabled = enabled, modifier = Modifier.weight(1f)) {
-                Text("Down")
+                Text("Up")
             }
         }
     }

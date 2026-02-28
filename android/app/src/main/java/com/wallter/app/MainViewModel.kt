@@ -50,6 +50,8 @@ class MainViewModel : ViewModel() {
     private var lastAngleUpdateMs: Long = 0L
     private val lastError = MutableStateFlow<String?>(null)
 
+    private var moveRequestId: Long = 0L
+
     private val firmwareUri = MutableStateFlow<Uri?>(null)
     private val firmwareName = MutableStateFlow<String?>(null)
 
@@ -135,13 +137,21 @@ class MainViewModel : ViewModel() {
         val c = client ?: return
         viewModelScope.launch {
             try {
-                // Test mode: always update local setpoint immediately.
-                val next = (testAngleDeg.value + 5f).coerceAtMost(90f)
-                testAngleDeg.value = next
+                lastError.value = null
 
-                // If connected, also send the button event to the device.
-                if (isConnected.value) {
-                    c.sendButtons(WallterUuids.BTN_EXTEND)
+                // Not connected: keep the existing “test mode” local update.
+                if (!isConnected.value) {
+                    val next = (testAngleDeg.value + 5f).coerceAtMost(90f)
+                    testAngleDeg.value = next
+                    return@launch
+                }
+
+                val before = currentAngleDeg.value
+                val reqId = ++moveRequestId
+                c.sendButtons(WallterUuids.BTN_EXTEND)
+                val accepted = waitForAngleChange(reqId, before)
+                if (!accepted) {
+                    lastError.value = "Move not accepted"
                 }
             } catch (t: Throwable) {
                 lastError.value = t.message ?: t.toString()
@@ -153,18 +163,49 @@ class MainViewModel : ViewModel() {
         val c = client ?: return
         viewModelScope.launch {
             try {
-                // Test mode: always update local setpoint immediately.
-                val next = (testAngleDeg.value - 5f).coerceAtLeast(0f)
-                testAngleDeg.value = next
+                lastError.value = null
 
-                // If connected, also send the button event to the device.
-                if (isConnected.value) {
-                    c.sendButtons(WallterUuids.BTN_RETRACT)
+                // Not connected: keep the existing “test mode” local update.
+                if (!isConnected.value) {
+                    val next = (testAngleDeg.value - 5f).coerceAtLeast(0f)
+                    testAngleDeg.value = next
+                    return@launch
+                }
+
+                val before = currentAngleDeg.value
+                val reqId = ++moveRequestId
+                c.sendButtons(WallterUuids.BTN_RETRACT)
+                val accepted = waitForAngleChange(reqId, before)
+                if (!accepted) {
+                    lastError.value = "Move not accepted"
                 }
             } catch (t: Throwable) {
                 lastError.value = t.message ?: t.toString()
             }
         }
+    }
+
+    private suspend fun waitForAngleChange(requestId: Long, before: Float?): Boolean {
+        // If another move request comes in, this one becomes obsolete.
+        val startMs = System.currentTimeMillis()
+        val timeoutMs = 1_500L
+        val epsilon = 0.25f
+
+        while (System.currentTimeMillis() - startMs < timeoutMs) {
+            if (requestId != moveRequestId) return true
+            if (!isConnected.value) return true
+
+            val now = currentAngleDeg.value
+            val changed = when {
+                before == null && now != null -> true
+                before != null && now == null -> false
+                before != null && now != null -> kotlin.math.abs(now - before) >= epsilon
+                else -> false
+            }
+            if (changed) return true
+            delay(100)
+        }
+        return false
     }
 
     fun setFirmwareUri(uri: Uri?) {
