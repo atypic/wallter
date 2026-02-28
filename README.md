@@ -22,7 +22,10 @@ CI builds produce:
 - `build/wallter.bin`
 - `build/wallter.bin.sha256` (a text file containing the SHA-256 of the `.bin`)
 
-On tags matching `v*`, these two files are uploaded as GitHub Release assets.
+On tags matching `v*`, CI also produces a flashable bundle:
+- `wallter-esp32s3-flashable-<tag>.zip` (bootloader + partition table + app + flasher args)
+
+On tags matching `v*`, these assets are uploaded as GitHub Release assets.
 
 ## BLE OTA GATT Protocol
 

@@ -33,6 +33,44 @@ jobs:
         run: |
           sha256sum build/wallter.bin > build/wallter.bin.sha256
 
+      - name: Package flashable bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          BUNDLE_NAME="wallter-esp32s3-flashable"
+          if [[ "${GITHUB_REF:-}" == refs/tags/* ]]; then
+            BUNDLE_NAME+="-${GITHUB_REF_NAME}"
+          fi
+          BUNDLE_PATH="build/${BUNDLE_NAME}.zip"
+          export BUNDLE_PATH
+
+          python3 - <<'PY'
+          import os
+          import zipfile
+
+          bundle_path = os.environ["BUNDLE_PATH"]
+          files = [
+              ("build/wallter.bin", "wallter.bin"),
+              ("build/wallter.bin.sha256", "wallter.bin.sha256"),
+              ("build/bootloader/bootloader.bin", "bootloader.bin"),
+              ("build/partition_table/partition-table.bin", "partition-table.bin"),
+              ("build/ota_data_initial.bin", "ota_data_initial.bin"),
+              ("build/flasher_args.json", "flasher_args.json"),
+              ("build/flash_args", "flash_args"),
+              ("build/flash_project_args", "flash_project_args"),
+          ]
+
+          missing = [src for src, _ in files if not os.path.exists(src)]
+          if missing:
+              raise SystemExit(f"Missing expected build outputs: {missing}")
+
+          os.makedirs(os.path.dirname(bundle_path), exist_ok=True)
+          with zipfile.ZipFile(bundle_path, "w", compression=zipfile.ZIP_DEFLATED) as z:
+              for src, dst in files:
+                  z.write(src, dst)
+          print(f"Wrote {bundle_path}")
+          PY
+
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
@@ -40,6 +78,7 @@ jobs:
           path: |
             build/wallter.bin
             build/wallter.bin.sha256
+            build/wallter-esp32s3-flashable*.zip
 
       - name: Upload to GitHub Release
         if: startsWith(github.ref, 'refs/tags/v')
@@ -48,3 +87,4 @@ jobs:
           files: |
             build/wallter.bin
             build/wallter.bin.sha256
+            build/wallter-esp32s3-flashable-${{ github.ref_name }}.zip
