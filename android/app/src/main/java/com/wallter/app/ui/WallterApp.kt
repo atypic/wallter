@@ -32,6 +32,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.wallter.app.BuildConfig
 import com.wallter.app.MainViewModel
 import com.wallter.app.FirmwareAsset
 
@@ -242,6 +243,12 @@ private fun MaintenanceSection(
                 Text("${asset.name} (${sizeKb} KB)")
             }
         }
+
+        Spacer(modifier = Modifier.height(8.dp))
+        Text("About", style = MaterialTheme.typography.titleMedium)
+        Text("Wallter ${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE})")
+        Text("Firmware source: GitHub Releases (${BuildConfig.GITHUB_OWNER}/${BuildConfig.GITHUB_REPO})")
+        Text("If needed: set github.owner/github.repo/github.token in android/local.properties")
 
         OutlinedButton(onClick = onReboot, enabled = enabled) { Text("Reboot") }
     }

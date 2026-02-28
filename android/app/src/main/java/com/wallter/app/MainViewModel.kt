@@ -4,6 +4,7 @@ import android.content.Context
 import android.net.Uri
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.wallter.app.BuildConfig
 import com.wallter.app.ble.WallterBleClient
 import com.wallter.app.ble.WallterStatus
 import com.wallter.app.ble.WallterUuids
@@ -263,7 +264,10 @@ class MainViewModel : ViewModel() {
     }
 
     private fun fetchGithubFirmwareAssets(): List<FirmwareAsset> {
-        val url = URL("https://api.github.com/repos/atypic/wallter/releases")
+        val owner = BuildConfig.GITHUB_OWNER
+        val repo = BuildConfig.GITHUB_REPO
+        val apiUrl = "https://api.github.com/repos/${owner}/${repo}/releases"
+        val url = URL(apiUrl)
         val conn = (url.openConnection() as HttpURLConnection).apply {
             requestMethod = "GET"
             setRequestProperty("Accept", "application/vnd.github+json")
@@ -272,12 +276,27 @@ class MainViewModel : ViewModel() {
             readTimeout = 10_000
         }
 
+        val token = BuildConfig.GITHUB_TOKEN.takeIf { it.isNotBlank() }
+        if (token != null) {
+            conn.setRequestProperty("Authorization", "Bearer $token")
+        }
+
         val code = conn.responseCode
         val stream = if (code in 200..299) conn.inputStream else conn.errorStream
         stream.use { input ->
             val body = input?.bufferedReader()?.readText().orEmpty()
             if (code !in 200..299) {
-                throw IOException("GitHub releases fetch failed: HTTP $code ${conn.responseMessage}: ${body.take(200)}")
+                val msg = try {
+                    JSONObject(body).optString("message").takeIf { it.isNotBlank() }
+                } catch (_: Throwable) {
+                    null
+                }
+                val hint = if (code == 404 && token == null) {
+                    " Check github.owner/github.repo in android/local.properties (or repo may be private; set github.token)."
+                } else {
+                    ""
+                }
+                throw IOException("GitHub releases fetch failed for $apiUrl: HTTP $code ${conn.responseMessage}${msg?.let { ": $it" } ?: ""}.$hint")
             }
 
             val arr = JSONArray(body)
@@ -405,8 +424,25 @@ class MainViewModel : ViewModel() {
             instanceFollowRedirects = true
         }
 
-        conn.inputStream.use { input ->
-            return input.readBytes()
+        val token = BuildConfig.GITHUB_TOKEN.takeIf { it.isNotBlank() }
+        if (token != null) {
+            conn.setRequestProperty("Authorization", "Bearer $token")
+        }
+
+        val code = conn.responseCode
+        val stream = if (code in 200..299) conn.inputStream else conn.errorStream
+        stream.use { input ->
+            val bytesOrText = input?.readBytes() ?: ByteArray(0)
+            if (code !in 200..299) {
+                val preview = bytesOrText.decodeToString().take(200)
+                val hint = if (code == 404 && token == null) {
+                    " Repo may be private; set github.token in android/local.properties."
+                } else {
+                    ""
+                }
+                throw IOException("Firmware download failed: HTTP $code ${conn.responseMessage}: ${preview}.$hint")
+            }
+            return bytesOrText
         }
     }
 
