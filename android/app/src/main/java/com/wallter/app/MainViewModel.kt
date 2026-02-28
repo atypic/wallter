@@ -16,7 +16,12 @@ import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import org.json.JSONArray
+import org.json.JSONObject
 import java.io.InputStream
+import java.net.HttpURLConnection
+import java.net.URL
+import java.io.IOException
 import java.security.MessageDigest
 
 data class UiState(
@@ -27,11 +32,22 @@ data class UiState(
     val connectedDeviceName: String? = null,
     val firmwareUri: Uri? = null,
     val firmwareName: String? = null,
+    val firmwareUrl: String? = null,
+    val availableFirmwares: List<FirmwareAsset> = emptyList(),
+    val isLoadingFirmwares: Boolean = false,
     val otaProgress: Float = 0f,
     val otaStatusText: String = "Idle",
     val currentAngleDeg: Float? = null,
     val testAngleDeg: Float = 10f,
     val lastError: String? = null,
+)
+
+data class FirmwareAsset(
+    val name: String,
+    val downloadUrl: String,
+    val sizeBytes: Long,
+    val releaseName: String?,
+    val publishedAt: String?,
 )
 
 class MainViewModel : ViewModel() {
@@ -54,6 +70,10 @@ class MainViewModel : ViewModel() {
 
     private val firmwareUri = MutableStateFlow<Uri?>(null)
     private val firmwareName = MutableStateFlow<String?>(null)
+    private val firmwareUrl = MutableStateFlow<String?>(null)
+
+    private val availableFirmwares = MutableStateFlow<List<FirmwareAsset>>(emptyList())
+    private val isLoadingFirmwares = MutableStateFlow(false)
 
     val uiState: StateFlow<UiState> = combine(
         permissionsGranted,
@@ -77,6 +97,9 @@ class MainViewModel : ViewModel() {
         .combine(lastError) { s, err -> s.copy(lastError = err) }
         .combine(firmwareUri) { s, uri -> s.copy(firmwareUri = uri) }
         .combine(firmwareName) { s, name -> s.copy(firmwareName = name) }
+        .combine(firmwareUrl) { s, url -> s.copy(firmwareUrl = url) }
+        .combine(availableFirmwares) { s, list -> s.copy(availableFirmwares = list) }
+        .combine(isLoadingFirmwares) { s, loading -> s.copy(isLoadingFirmwares = loading) }
         .stateIn(viewModelScope, kotlinx.coroutines.flow.SharingStarted.Eagerly, UiState())
 
     fun onPermissionsResult(grants: Map<String, Boolean>) {
@@ -211,6 +234,84 @@ class MainViewModel : ViewModel() {
     fun setFirmwareUri(uri: Uri?) {
         firmwareUri.value = uri
         firmwareName.value = uri?.lastPathSegment
+        firmwareUrl.value = null
+    }
+
+    fun setFirmwareFromUrl(name: String, url: String) {
+        firmwareUri.value = null
+        firmwareName.value = name
+        firmwareUrl.value = url
+    }
+
+    fun refreshAvailableFirmwares() {
+        viewModelScope.launch {
+            isLoadingFirmwares.value = true
+            try {
+                val list = withContext(Dispatchers.IO) {
+                    fetchGithubFirmwareAssets()
+                }
+                availableFirmwares.value = list
+                if (list.isEmpty()) {
+                    lastError.value = "No firmware assets found in GitHub releases"
+                }
+            } catch (t: Throwable) {
+                lastError.value = t.message ?: t.toString()
+            } finally {
+                isLoadingFirmwares.value = false
+            }
+        }
+    }
+
+    private fun fetchGithubFirmwareAssets(): List<FirmwareAsset> {
+        val url = URL("https://api.github.com/repos/atypic/wallter/releases")
+        val conn = (url.openConnection() as HttpURLConnection).apply {
+            requestMethod = "GET"
+            setRequestProperty("Accept", "application/vnd.github+json")
+            setRequestProperty("User-Agent", "WallterApp")
+            connectTimeout = 10_000
+            readTimeout = 10_000
+        }
+
+        val code = conn.responseCode
+        val stream = if (code in 200..299) conn.inputStream else conn.errorStream
+        stream.use { input ->
+            val body = input?.bufferedReader()?.readText().orEmpty()
+            if (code !in 200..299) {
+                throw IOException("GitHub releases fetch failed: HTTP $code ${conn.responseMessage}: ${body.take(200)}")
+            }
+
+            val arr = JSONArray(body)
+            val out = mutableListOf<FirmwareAsset>()
+
+            // Preserve GitHub ordering (newest releases first, then asset order).
+            for (i in 0 until arr.length()) {
+                val rel = arr.optJSONObject(i) ?: continue
+                val releaseName = rel.optString("name").takeIf { it.isNotBlank() }
+                    ?: rel.optString("tag_name").takeIf { it.isNotBlank() }
+                val publishedAt = rel.optString("published_at").takeIf { it.isNotBlank() }
+
+                val assets = rel.optJSONArray("assets") ?: continue
+                for (j in 0 until assets.length()) {
+                    val asset = assets.optJSONObject(j) ?: continue
+                    val name = asset.optString("name")
+                    val dl = asset.optString("browser_download_url")
+                    val size = asset.optLong("size", -1L).coerceAtLeast(0L)
+                    if (name.isBlank() || dl.isBlank()) continue
+
+                    if (!name.endsWith(".bin", ignoreCase = true)) continue
+
+                    out += FirmwareAsset(
+                        name = name,
+                        downloadUrl = dl,
+                        sizeBytes = size,
+                        releaseName = releaseName,
+                        publishedAt = publishedAt,
+                    )
+                }
+            }
+
+            return out
+        }
     }
 
     fun reboot() {
@@ -226,7 +327,10 @@ class MainViewModel : ViewModel() {
 
     fun startOta(context: Context) {
         val c = client ?: return
-        val uri = firmwareUri.value ?: return
+        val uri = firmwareUri.value
+        val url = firmwareUrl.value
+
+        if (uri == null && url == null) return
 
         viewModelScope.launch {
             otaProgress.value = 0f
@@ -235,9 +339,16 @@ class MainViewModel : ViewModel() {
 
             try {
                 withContext(Dispatchers.IO) {
-                    context.contentResolver.openInputStream(uri).use { input ->
-                        if (input == null) throw IllegalStateException("Unable to open firmware")
-                        val bytes = input.readBytes()
+                    val bytes = if (uri != null) {
+                        context.contentResolver.openInputStream(uri).use { input ->
+                            if (input == null) throw IllegalStateException("Unable to open firmware")
+                            input.readBytes()
+                        }
+                    } else {
+                        otaStatusText.value = "Downloading…"
+                        downloadFirmware(url!!)
+                    }
+
                         val sha256 = MessageDigest.getInstance("SHA-256").digest(bytes)
 
                         otaStatusText.value = "BEGIN"
@@ -271,7 +382,6 @@ class MainViewModel : ViewModel() {
                             delay(500)
                         }
                         throw IllegalStateException("Timed out waiting for Ready")
-                    }
                 }
             } catch (t: Throwable) {
                 otaStatusText.value = "Error"
@@ -281,6 +391,22 @@ class MainViewModel : ViewModel() {
                 } catch (_: Throwable) {
                 }
             }
+        }
+    }
+
+    private fun downloadFirmware(downloadUrl: String): ByteArray {
+        val url = URL(downloadUrl)
+        val conn = (url.openConnection() as HttpURLConnection).apply {
+            requestMethod = "GET"
+            setRequestProperty("Accept", "application/octet-stream")
+            setRequestProperty("User-Agent", "WallterApp")
+            connectTimeout = 15_000
+            readTimeout = 30_000
+            instanceFollowRedirects = true
+        }
+
+        conn.inputStream.use { input ->
+            return input.readBytes()
         }
     }
 

@@ -3,7 +3,6 @@ package com.wallter.app.ui
 import android.Manifest
 import android.content.Context
 import android.content.pm.PackageManager
-import android.net.Uri
 import android.os.Build
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -34,6 +33,7 @@ import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.wallter.app.MainViewModel
+import com.wallter.app.FirmwareAsset
 
 @Composable
 fun WallterRoot(viewModel: MainViewModel = viewModel()) {
@@ -76,11 +76,13 @@ fun WallterApp(viewModel: MainViewModel) {
     val ui by viewModel.uiState.collectAsState()
     var mode by remember { mutableStateOf(Mode.Control) }
 
-    val pickBinLauncher = rememberLauncherForActivityResult(
-        ActivityResultContracts.OpenDocument()
-    ) { uri: Uri? ->
-        viewModel.setFirmwareUri(uri)
+    LaunchedEffect(mode) {
+        if (mode == Mode.Maintenance && ui.availableFirmwares.isEmpty() && !ui.isLoadingFirmwares) {
+            viewModel.refreshAvailableFirmwares()
+        }
     }
+
+    // Local file picking is intentionally removed in favor of listing public GitHub releases.
 
     Scaffold { padding ->
         Column(
@@ -123,9 +125,11 @@ fun WallterApp(viewModel: MainViewModel) {
                 MaintenanceSection(
                     enabled = ui.isConnected,
                     firmwareName = ui.firmwareName,
+                    availableFirmwares = ui.availableFirmwares,
+                    isLoadingFirmwares = ui.isLoadingFirmwares,
                     progress = ui.otaProgress,
                     statusText = ui.otaStatusText,
-                    onPickBin = { pickBinLauncher.launch(arrayOf("application/octet-stream", "*/*")) },
+                    onSelectFirmware = { asset -> viewModel.setFirmwareFromUrl(asset.name, asset.downloadUrl) },
                     onStartOta = { viewModel.startOta(context) },
                     onReboot = { viewModel.reboot() },
                 )
@@ -204,9 +208,11 @@ private fun ControlSection(
 private fun MaintenanceSection(
     enabled: Boolean,
     firmwareName: String?,
+    availableFirmwares: List<FirmwareAsset>,
+    isLoadingFirmwares: Boolean,
     progress: Float,
     statusText: String,
-    onPickBin: () -> Unit,
+    onSelectFirmware: (FirmwareAsset) -> Unit,
     onStartOta: () -> Unit,
     onReboot: () -> Unit,
 ) {
@@ -216,9 +222,25 @@ private fun MaintenanceSection(
         Text("Status: $statusText")
         Text("Progress: ${(progress * 100).toInt()}%")
 
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            OutlinedButton(onClick = onPickBin, enabled = enabled) { Text("Choose .bin") }
-            Button(onClick = onStartOta, enabled = enabled && firmwareName != null) { Text("Start") }
+        Button(onClick = onStartOta, enabled = enabled && firmwareName != null) { Text("Start") }
+
+        Text(
+            if (availableFirmwares.isEmpty()) {
+                if (isLoadingFirmwares) "Loading firmwares…" else "No firmwares loaded"
+            } else {
+                "Available firmwares"
+            }
+        )
+
+        for (asset in availableFirmwares) {
+            OutlinedButton(
+                onClick = { onSelectFirmware(asset) },
+                enabled = true,
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                val sizeKb = (asset.sizeBytes / 1024L).toInt()
+                Text("${asset.name} (${sizeKb} KB)")
+            }
         }
 
         OutlinedButton(onClick = onReboot, enabled = enabled) { Text("Reboot") }
