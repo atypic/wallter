@@ -248,7 +248,7 @@ private fun MaintenanceSection(
         Text("About", style = MaterialTheme.typography.titleMedium)
         Text("Wallter ${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE})")
         Text("Firmware source: GitHub Releases (${BuildConfig.GITHUB_OWNER}/${BuildConfig.GITHUB_REPO})")
-        Text("If needed: set github.owner/github.repo/github.token in android/local.properties")
+        Text("If needed: provide GitHub token at build time (github.token or GITHUB_TOKEN)")
 
         OutlinedButton(onClick = onReboot, enabled = enabled) { Text("Reboot") }
     }

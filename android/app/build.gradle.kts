@@ -3,22 +3,11 @@ plugins {
     id("org.jetbrains.kotlin.android")
 }
 
-import java.util.Properties
-
-val localProps = Properties().apply {
-    val f = rootProject.file("local.properties")
-    if (f.exists()) {
-        f.inputStream().use { load(it) }
-    }
-}
-
-val githubToken: String = (localProps.getProperty("github.token")
-    ?: localProps.getProperty("GITHUB_TOKEN")
-    ?: ""
+val githubToken: String = (
+    providers.gradleProperty("github.token").orNull
+        ?: System.getenv("GITHUB_TOKEN")
+        ?: ""
 ).trim()
-
-val githubOwner: String = (localProps.getProperty("github.owner") ?: "atypic").trim()
-val githubRepo: String = (localProps.getProperty("github.repo") ?: "wallter").trim()
 
 android {
     namespace = "com.wallter.app"
@@ -31,8 +20,8 @@ android {
         versionCode = 1
         versionName = "0.1"
 
-        buildConfigField("String", "GITHUB_OWNER", "\"${githubOwner}\"")
-        buildConfigField("String", "GITHUB_REPO", "\"${githubRepo}\"")
+        buildConfigField("String", "GITHUB_OWNER", "\"atypic\"")
+        buildConfigField("String", "GITHUB_REPO", "\"wallter\"")
 
         // Default empty; overridden for debug below when a token exists.
         buildConfigField("String", "GITHUB_TOKEN", "\"\"")

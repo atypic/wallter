@@ -292,7 +292,7 @@ class MainViewModel : ViewModel() {
                     null
                 }
                 val hint = if (code == 404 && token == null) {
-                    " Check github.owner/github.repo in android/local.properties (or repo may be private; set github.token)."
+                    " Repo may be private; provide a GitHub token at build time (Gradle property github.token or env GITHUB_TOKEN)."
                 } else {
                     ""
                 }
