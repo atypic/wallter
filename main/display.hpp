@@ -14,6 +14,7 @@
 
 typedef enum display_views {
     LCD_HOMING_VIEW,
+    LCD_CURRENT_VIEW,
     LCD_TARGET_VIEW,
     LCD_SHORT_MESSAGE_VIEW,
     LCD_MANUAL_VIEW,
@@ -33,6 +34,7 @@ class Display {
     void set_refresh_rate(float seconds);
     void trigger_refresh();
 
+    void update_current_view(float cur_angle);
     void update_target_view(float target_angle, uint8_t percent);
     void update_homing_view();
     void update_manual_view(long pos_ticks);
@@ -46,6 +48,7 @@ class Display {
     display_views_t next_view;
     display_views_t previous_view;
     uint32_t last_update_ms;
+    uint32_t last_reinit_ms;
     uint32_t refresh_interval_ms;
     int32_t short_view_time_ms;
     uint32_t short_view_start_ms;

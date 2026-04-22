@@ -10,11 +10,13 @@ class MotorDriver;
 namespace wallter::modes {
 
 enum BootMenuChoice {
-    MENU_CALIBRATE = 0,
-    MENU_SELF_TEST = 1,
-    MENU_JOG = 2,
-    MENU_HAL_TEST = 3,
-    MENU_RESET_CAL = 4,
+    MENU_SET_MAX_ANGLE = 0,
+    MENU_SET_MIN_ANGLE = 1,
+    MENU_SET_OFFSET = 2,
+    MENU_SELF_TEST = 3,
+    MENU_JOG = 4,
+    MENU_HAL_TEST = 5,
+    MENU_RESET_CAL = 6,
 };
 
 struct Services {
@@ -23,12 +25,10 @@ struct Services {
     int num_motors{};
     int master_motor_index{};
 
-    // Target tick table
-    uint32_t *target_ticks{};
     int max_angles{};
     uint32_t *target_idx{};
 
-    // Calibration metadata (min/max usable angles) and derived homing offset.
+    // Angle range limits (min is always the hard-stop; only max is user-configurable).
     wallter::calibration::CalMeta *cal_meta{};
 
     // Hardware button level reads (active-low -> true means pressed)
@@ -49,7 +49,9 @@ struct Services {
 };
 
 BootMenuChoice run_boot_menu(Services &svc);
-void run_calibration_mode(Services &svc);
+void run_set_max_angle_mode(Services &svc);
+void run_set_min_angle_mode(Services &svc);
+void run_set_angle_offset_mode(Services &svc);
 void run_self_test_sequence(Services &svc);
 void run_hal_feedback_test(Services &svc);
 void run_reset_calibration_data(Services &svc);

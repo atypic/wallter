@@ -36,6 +36,7 @@ Display::Display()
     next_view(LCD_HOMING_VIEW),
     previous_view(LCD_HOMING_VIEW),
     last_update_ms(0),
+    last_reinit_ms(0),
     refresh_interval_ms(REFRESH_INTERVAL),
     short_view_time_ms(0),
     short_view_start_ms(0),
@@ -101,9 +102,19 @@ void Display::set_view(display_views_t view) {
 
 void Display::set_next_view(display_views_t view) { next_view = view; }
 
+static constexpr uint32_t kReinitIntervalMs = 2000;
+
 void Display::refresh() {
     uint32_t now = (uint32_t)(esp_timer_get_time() / 1000ULL);
-    if (last_update_ms == 0) last_update_ms = now;
+    if (last_update_ms == 0) { last_update_ms = now; last_reinit_ms = now; }
+
+    // Periodic LCD controller reinit to recover from garbled display.
+    if ((now - last_reinit_ms) >= kReinitIntervalMs) {
+        last_reinit_ms = now;
+        lcd.begin(16, 2, 0);
+        pending_refresh = true;
+    }
+
     // Respect refresh interval unless explicitly triggered
     if (!pending_refresh && (now - last_update_ms) < refresh_interval_ms) return;
     pending_refresh = false;
@@ -128,6 +139,12 @@ void Display::refresh() {
 
 void Display::set_refresh_rate(float seconds) { refresh_interval_ms = (uint32_t)(seconds * 1000.0f); }
 void Display::trigger_refresh() { pending_refresh = true; }
+
+void Display::update_current_view(float cur_angle) {
+    snprintf(view_buffers[LCD_CURRENT_VIEW][0], 17, "Current: %.1f", cur_angle);
+    snprintf(view_buffers[LCD_CURRENT_VIEW][1], 17, "%-16s", "");
+    next_view = LCD_CURRENT_VIEW;
+}
 
 void Display::update_target_view(float target_angle, uint8_t percent) {
     // Top row: target angle, formatted similar to Arduino version
@@ -178,11 +195,17 @@ void Display::cycle_colors() {
 }
 
 void Display::startup_animation() {
+    // Show firmware version for 2 seconds first.
+    lcd.clear();
+    lcd.setRGB(LCD_BACKLIGHT_R, LCD_BACKLIGHT_G, LCD_BACKLIGHT_B);
+    print(VERSION_STRING, "");
+    vTaskDelay(pdMS_TO_TICKS(2000));
+
     const char *line1 = "ARCTIC";
     const char *line2 = "GRIPS";
     const int len1 = (int)strlen(line1);
     const int len2 = (int)strlen(line2);
-    const uint32_t total_ms = 5000; // 5 seconds
+    const uint32_t total_ms = 1500; // 1.5 seconds
     const uint32_t frame_ms = 60;   // ~60ms per frame
     const int frames = (int)(total_ms / frame_ms);
 

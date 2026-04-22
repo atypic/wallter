@@ -2,6 +2,7 @@
 
 #include "app_config.hpp"
 
+#include "accel.hpp"
 #include "commands.hpp"
 #include "display.hpp"
 #include "motordriver.hpp"
@@ -29,6 +30,7 @@ static bool g_accel_phase = false;
 static uint64_t g_delta_acc_ms = 0;
 
 static int32_t g_progress_start_ticks = 0;
+static float g_progress_start_angle_deg = 0.0f;
 static uint64_t g_last_error_check_ms = 0;
 static uint64_t g_last_print_ms = 0;
 static uint64_t g_last_command_change_ms = 0;
@@ -180,6 +182,7 @@ void init(const Context &ctx) {
     g_accel_phase = false;
     g_delta_acc_ms = 0;
     g_progress_start_ticks = g_ctx.motors[g_ctx.master_motor_index].getPosition();
+    g_progress_start_angle_deg = wallter::accel::read_angle_deg();
     g_last_command_change_ms = now_ms();
 
 }
@@ -194,6 +197,14 @@ int32_t master_position() {
 
 int32_t progress_start_ticks() {
     return g_progress_start_ticks;
+}
+
+float master_angle_deg() {
+    return wallter::accel::read_angle_deg();
+}
+
+float progress_start_angle_deg() {
+    return g_progress_start_angle_deg;
 }
 
 void set_command(int cmd) {
@@ -226,6 +237,7 @@ void set_command(int cmd) {
         g_master_last_so = g_ctx.motors[g_ctx.master_motor_index].getStepsOut();
         g_master_moved_since_cmd = false;
         g_progress_start_ticks = g_ctx.motors[g_ctx.master_motor_index].getPosition();
+        g_progress_start_angle_deg = wallter::accel::read_angle_deg();
 
         if (cmd == wallter::CMD_HOME) {
             // Baseline homing completion detection after step counters are reset.
@@ -237,6 +249,7 @@ void set_command(int cmd) {
         // after motors stop.
         g_ctx.display->set_refresh_rate(1.0f);
         g_progress_start_ticks = g_ctx.motors[g_ctx.master_motor_index].getPosition();
+        g_progress_start_angle_deg = wallter::accel::read_angle_deg();
         for (int i = 0; i < g_ctx.num_motors; ++i) {
             g_ctx.motors[i].resetIdle();
         }
@@ -245,7 +258,7 @@ void set_command(int cmd) {
 }
 
 static int32_t get_master_motor_speed() {
-    int32_t target = (int32_t)g_ctx.target_ticks[*g_ctx.target_idx];
+    float target_deg = g_ctx.target_angles[*g_ctx.target_idx];
 
     uint32_t return_speed = (uint32_t)abs(g_ctx.motors[g_ctx.master_motor_index].getSpeed());
     if ((return_speed < (uint32_t)MINSPEED) && (g_current_cmd != wallter::CMD_STOP)) {
@@ -269,7 +282,7 @@ static int32_t get_master_motor_speed() {
     }
 
     bool target_reached = false;
-    int32_t current_pos = g_ctx.motors[g_ctx.master_motor_index].getPosition();
+    float current_deg = wallter::accel::read_angle_deg();
 
     if (g_current_cmd == wallter::CMD_HOME) {
         uint64_t n = now_ms();
@@ -333,18 +346,12 @@ static int32_t get_master_motor_speed() {
             }
         }
     } else if (g_current_cmd == wallter::CMD_RETRACT) {
-        // Only do the near-home auto-transition when we're actually heading to home.
-        // Otherwise small-angle targets (low tick values) can incorrectly trigger homing.
-        if (*g_ctx.target_idx == 0 && current_pos <= 1000) {
-            ESP_LOGI(TAG, "Auto-transition: retract-to-home pos=%ld -> CMD_HOME", (long)current_pos);
-            set_command(wallter::CMD_HOME);
-        }
-        if (current_pos <= (int32_t)target) {
+        if (current_deg <= target_deg) {
             target_reached = true;
         }
     } else if (g_current_cmd == wallter::CMD_EXTEND) {
-        if (current_pos >= (int32_t)target) {
-            ESP_LOGI(TAG, "Target reached");
+        if (current_deg >= target_deg) {
+            ESP_LOGI(TAG, "Target reached angle=%.1f target=%.1f", (double)current_deg, (double)target_deg);
             target_reached = true;
         }
     }
@@ -367,6 +374,14 @@ static int32_t get_master_motor_speed() {
 }
 
 void iterate() {
+    // Update accelerometer filter once per iteration before any angle reads.
+    {
+        float hint = 0.0f;
+        if (g_current_cmd == wallter::CMD_EXTEND) hint = +1.0f;
+        else if (g_current_cmd == wallter::CMD_RETRACT || g_current_cmd == wallter::CMD_HOME) hint = -1.0f;
+        wallter::accel::update(hint);
+    }
+
     // Pull PCNT hardware counts into MotorDriver step/position counters.
     wallter::inputs::poll_encoder_counts();
 
@@ -486,11 +501,15 @@ void print_state(uint32_t print_rate_ms) {
                  (int)dir1);
     }
 
+    float angle = wallter::accel::read_angle_deg();
+    float tgt_deg = g_ctx.target_angles[*g_ctx.target_idx];
     ESP_LOGI(TAG,
-             "CMD:%d tgtIdx:%u tgtTicks:%u pos:[%ld %ld] spd:[%ld %ld] dir:[%d %d] stepsOut:[%lu %lu] stepsIn:[%lu %lu] idleMs:[%u %u]",
+             "CMD:%d tgtIdx:%u tgtTicks:%u tgtDeg:%.1f angle:%.1f pos:[%ld %ld] spd:[%ld %ld] dir:[%d %d] stepsOut:[%lu %lu] stepsIn:[%lu %lu] idleMs:[%u %u]",
              (int)g_current_cmd,
              (unsigned)*g_ctx.target_idx,
              (unsigned)tgt,
+             (double)tgt_deg,
+             (double)angle,
              (long)pos0,
              (long)pos1,
              (long)spd0,
@@ -606,14 +625,17 @@ void handle_buttons(bool extend_event, bool retract_event) {
         return;
     }
 
-    uint32_t new_target_pos = g_ctx.target_ticks[new_idx];
-    int32_t pos = g_ctx.motors[g_ctx.master_motor_index].getPosition();
+    float new_target_deg = g_ctx.target_angles[new_idx];
+    float current_deg = wallter::accel::read_angle_deg();
+    // Scale to fixed-point integers so decide_command_for_target can compare them.
+    int32_t pos_x10 = (int32_t)(current_deg * 10.0f);
+    uint32_t tgt_x10 = (uint32_t)(new_target_deg * 10.0f);
 
     // Accept target changes even if it requires reversing direction.
     // This avoids getting "stuck" extending at a high target if the user decides to retract.
     *g_ctx.target_idx = (uint32_t)new_idx;
-    int decided = decide_command_for_target(pos,
-                                           new_target_pos,
+    int decided = decide_command_for_target(pos_x10,
+                                           tgt_x10,
                                            wallter::CMD_STOP,
                                            wallter::CMD_EXTEND,
                                            wallter::CMD_RETRACT,

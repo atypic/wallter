@@ -29,7 +29,7 @@ BootMenuChoice run_boot_menu(Services &svc) {
     bool prev_extend = false;
     bool prev_retract = false;
 
-    static const char *items[] = {"Calibrate", "Run self test", "Jog mode", "HAL test", "Reset cal"};
+    static const char *items[] = {"Set max angle", "Set min angle", "Angle offset", "Run self test", "Jog mode", "HAL test", "Reset cal"};
     static constexpr int kNumItems = (int)(sizeof(items) / sizeof(items[0]));
 
     svc.display->set_refresh_rate(0.2f);
@@ -69,10 +69,12 @@ BootMenuChoice run_boot_menu(Services &svc) {
             while (svc.read_extend_pressed() || svc.read_retract_pressed()) {
                 vTaskDelay(pdMS_TO_TICKS(30));
             }
-            if (sel == 0) return MENU_CALIBRATE;
-            if (sel == 1) return MENU_SELF_TEST;
-            if (sel == 2) return MENU_JOG;
-            if (sel == 3) return MENU_HAL_TEST;
+            if (sel == 0) return MENU_SET_MAX_ANGLE;
+            if (sel == 1) return MENU_SET_MIN_ANGLE;
+            if (sel == 2) return MENU_SET_OFFSET;
+            if (sel == 3) return MENU_SELF_TEST;
+            if (sel == 4) return MENU_JOG;
+            if (sel == 5) return MENU_HAL_TEST;
             return MENU_RESET_CAL;
         }
 
@@ -106,227 +108,212 @@ void run_reset_calibration_data(Services &svc) {
     }
 }
 
-void run_calibration_mode(Services &svc) {
+void run_set_max_angle_mode(Services &svc) {
     if (!svc.cal_meta) {
         svc.panicf("NO META");
     }
 
-    auto clamp_meta = [&]() {
-        int min_deg = (int)svc.cal_meta->min_angle_deg;
-        int max_deg = (int)svc.cal_meta->max_angle_deg;
-        if (min_deg < LOWEST_ANGLE) min_deg = LOWEST_ANGLE;
-        if (max_deg > HIGHEST_ANGLE) max_deg = HIGHEST_ANGLE;
-        if (((min_deg - LOWEST_ANGLE) % ANGLE_STEP) != 0) min_deg = LOWEST_ANGLE;
-        if (((max_deg - LOWEST_ANGLE) % ANGLE_STEP) != 0) max_deg = HIGHEST_ANGLE;
-        if (min_deg > max_deg) max_deg = min_deg;
-        svc.cal_meta->min_angle_deg = (uint8_t)min_deg;
-        svc.cal_meta->max_angle_deg = (uint8_t)max_deg;
-    };
-    clamp_meta();
-
-    // Start by homing to the physical hard-stop (fully retracted).
-    svc.run_homing_blocking(/*timeout_ms=*/45000);
-
-    enum class CalAction {
-        STORE_HAL = 0,
-        SET_MAX = 1,
-        SKIP = 2,
-    };
-
-    auto action_label = [&](CalAction a) -> const char * {
-        switch (a) {
-            case CalAction::STORE_HAL: return ">Store HAL";
-            case CalAction::SET_MAX:   return ">Set Max";
-            case CalAction::SKIP:      return ">Skip";
-        }
-        return ">?";
-    };
-
-    auto run_action_menu = [&](int angle, CalAction initial_sel) -> CalAction {
-        CalAction sel = initial_sel;
-        bool prev_extend = false;
-        bool prev_retract = false;
-
-        // Wait for release so we don't instantly select due to the BOTH-press that opened the menu.
-        while (svc.read_extend_pressed() || svc.read_retract_pressed()) {
-            vTaskDelay(pdMS_TO_TICKS(30));
-        }
-
-        while (1) {
-            // This mode drives motors directly (no control loop), so we must poll PCNT
-            // to transfer encoder counts into MotorDriver counters.
-            wallter::inputs::poll_encoder_counts();
-
-            // Render
-            const char deg = (char)0xDF;
-            char line1[17];
-            char line2[17];
-            int32_t pos = svc.motors[svc.master_motor_index].getPosition();
-            if (pos < 0) pos = 0;
-            if (pos > 99999) pos = 99999;
-            snprintf(line1, sizeof(line1), "%2d%c H%5ld", angle, deg, (long)pos);
-            snprintf(line2, sizeof(line2), "%s", action_label(sel));
-            svc.display->print(line1, line2);
-
-            bool extend = svc.read_extend_pressed();
-            bool retract = svc.read_retract_pressed();
-
-            // RETRACT cycles
-            if (retract && !prev_retract) {
-                sel = (sel == CalAction::SKIP) ? CalAction::STORE_HAL : (CalAction)((int)sel + 1);
-            }
-
-            // EXTEND selects
-            if (extend && !prev_extend) {
-                while (svc.read_extend_pressed() || svc.read_retract_pressed()) {
-                    vTaskDelay(pdMS_TO_TICKS(30));
-                }
-                return sel;
-            }
-
-            prev_extend = extend;
-            prev_retract = retract;
-            vTaskDelay(pdMS_TO_TICKS(60));
-        }
-    };
-
-    auto save_all_to_nvs = [&]() {
-        // Store raw ticks (position from fully retracted home) directly.
-        uint32_t raw[wallter::kMaxAngles] = {0};
-        for (int i = 0; i < svc.max_angles; ++i) {
-            raw[i] = svc.target_ticks[i];
-        }
-
-        (void)wallter::calibration::save_from_target_ticks(raw, svc.max_angles);
-        (void)wallter::calibration::save_meta(*svc.cal_meta);
-    };
-
-    int configured_max_angle = (int)svc.cal_meta->max_angle_deg;
-    (void)configured_max_angle;
-
-    static constexpr int32_t kJogSpeed = MAXSPEED;
-
-    for (int angle = LOWEST_ANGLE; angle <= HIGHEST_ANGLE; angle += ANGLE_STEP) {
-        int idx = wallter::angle_to_index(angle);
-        if (idx < 0) {
-            svc.panicf("BAD ANG %d", angle);
-        }
-        *svc.target_idx = (uint32_t)idx;
-
-        // Manual jog screen: hold EXTEND/RETRACT to move.
-        // Press BOTH to open the store/min/max/skip menu.
-        CalAction menu_default = CalAction::STORE_HAL;
-        bool prev_both = false;
-
-        int32_t last_shown_pos = INT32_MIN;
-        uint64_t last_shown_ms = 0;
-
-        // Per-angle loop: manual jog
-        while (1) {
-            // This mode drives motors directly (no control loop), so we must poll PCNT
-            // to transfer encoder counts into MotorDriver counters.
-            wallter::inputs::poll_encoder_counts();
-
-            bool extend = svc.read_extend_pressed();
-            bool retract = svc.read_retract_pressed();
-            bool both = extend && retract;
-
-            // Manual jog by directly commanding motor speeds.
-            // This avoids the control state machine's retract->home auto-transition and LCD view changes.
-            int32_t spd = 0;
-            if (!both) {
-                if (extend) spd = kJogSpeed;
-                if (retract) spd = -kJogSpeed;
-            }
-            for (int m = 0; m < svc.num_motors; ++m) {
-                svc.motors[m].setSpeed(spd);
-            }
-
-            // Display
-            const char deg = (char)0xDF;
-            char line1[17];
-            char line2[17];
-            int32_t pos = svc.motors[svc.master_motor_index].getPosition();
-            if (pos < 0) pos = 0;
-            if (pos > 99999) pos = 99999;
-            // Line 1: angle + HAL CNT
-            snprintf(line1, sizeof(line1), "%2d%c H%5ld", angle, deg, (long)pos);
-            // Line 2: instructions
-            snprintf(line2, sizeof(line2), "Jog; BOTH=Menu");
-
-            uint64_t now_ms = svc.now_ms();
-            int32_t coarse_pos = (pos / 50) * 50;
-            bool pos_changed = (last_shown_pos == INT32_MIN) || (coarse_pos != last_shown_pos);
-            bool time_changed = (now_ms - last_shown_ms) >= 350ULL;
-            if (pos_changed || time_changed) {
-                svc.display->print(line1, line2);
-                last_shown_pos = coarse_pos;
-                last_shown_ms = now_ms;
-            }
-
-            if (both && !prev_both) {
-                // Enter the action menu.
-                for (int m = 0; m < svc.num_motors; ++m) {
-                    svc.motors[m].setSpeed(0);
-                }
-
-                CalAction action = run_action_menu(angle, menu_default);
-                menu_default = action;
-
-                // Snapshot position after menu interaction
-                int32_t pos_now = svc.motors[svc.master_motor_index].getPosition();
-                if (pos_now < 0) pos_now = 0;
-
-                if (action == CalAction::SKIP) {
-                    svc.display->print("Skipped", "");
-                    uint64_t end = svc.now_ms() + 350ULL;
-                    while (svc.now_ms() < end) vTaskDelay(pdMS_TO_TICKS(30));
-
-                    // Ensure motors are stopped when leaving this step.
-                    for (int m = 0; m < svc.num_motors; ++m) {
-                        svc.motors[m].setSpeed(0);
-                    }
-                    break;
-                }
-
-                if (action == CalAction::STORE_HAL) {
-                    svc.target_ticks[idx] = (uint32_t)pos_now;
-                    save_all_to_nvs();
-                    svc.display->print("Stored", "");
-                    uint64_t end = svc.now_ms() + 450ULL;
-                    while (svc.now_ms() < end) vTaskDelay(pdMS_TO_TICKS(30));
-
-                    for (int m = 0; m < svc.num_motors; ++m) {
-                        svc.motors[m].setSpeed(0);
-                    }
-                    break;
-                }
-
-                if (action == CalAction::SET_MAX) {
-                    svc.cal_meta->max_angle_deg = (uint8_t)angle;
-                    clamp_meta();
-                    configured_max_angle = (int)svc.cal_meta->max_angle_deg;
-                    int min_idx2 = 0;
-                    int max_idx2 = wallter::angle_to_index((int)svc.cal_meta->max_angle_deg);
-                    if (max_idx2 < 0) max_idx2 = svc.max_angles - 1;
-                    wallter::control::update_limits(min_idx2, max_idx2);
-                    save_all_to_nvs();
-                    svc.display->print("Max set", "Stored");
-                    uint64_t end = svc.now_ms() + 600ULL;
-                    while (svc.now_ms() < end) vTaskDelay(pdMS_TO_TICKS(30));
-                    // End calibration when max is set.
-                    goto calibration_done;
-                }
-            }
-
-            prev_both = both;
-            vTaskDelay(pdMS_TO_TICKS(80));
-        }
+    // Snap the stored max angle to the nearest valid step; default to HIGHEST_ANGLE.
+    // Valid values are any ANGLE_STEP multiple in [ANGLE_STEP, HIGHEST_ANGLE].
+    int cur_max = (int)svc.cal_meta->max_angle_deg;
+    if (cur_max < ANGLE_STEP || cur_max > HIGHEST_ANGLE || (cur_max % ANGLE_STEP) != 0) {
+        cur_max = DEFAULT_CAL_MAX_ANGLE;
     }
 
-calibration_done:
-    svc.display->print("Cal complete", "Homing...");
-    svc.run_homing_blocking(/*timeout_ms=*/45000);
+    bool prev_extend = false;
+    bool prev_retract = false;
+
+    // Drain any held buttons before entering the menu.
+    while (svc.read_extend_pressed() || svc.read_retract_pressed()) {
+        vTaskDelay(pdMS_TO_TICKS(30));
+    }
+
+    svc.display->set_refresh_rate(0.2f);
+
+    const char kDeg = (char)0xDF;
+    auto render = [&]() {
+        char line1[17];
+        snprintf(line1, sizeof(line1), "Set max: %d%c", cur_max, kDeg);
+        svc.display->print(line1, "R=Next  E=Save");
+    };
+    render();
+
+    while (1) {
+        bool extend = svc.read_extend_pressed();
+        bool retract = svc.read_retract_pressed();
+
+        // RETRACT cycles from ANGLE_STEP up to HIGHEST_ANGLE, then wraps.
+        if (retract && !prev_retract) {
+            cur_max += ANGLE_STEP;
+            if (cur_max > HIGHEST_ANGLE) cur_max = ANGLE_STEP;
+            render();
+        }
+
+        // EXTEND confirms and saves.
+        if (extend && !prev_extend) {
+            while (svc.read_extend_pressed() || svc.read_retract_pressed()) {
+                vTaskDelay(pdMS_TO_TICKS(30));
+            }
+
+            svc.cal_meta->max_angle_deg = (uint8_t)cur_max;
+            (void)wallter::calibration::save_meta(*svc.cal_meta);
+
+            char line1[17];
+            snprintf(line1, sizeof(line1), "Max: %d%c saved", cur_max, kDeg);
+            svc.display->print(line1, "");
+            uint64_t end = svc.now_ms() + 800ULL;
+            while (svc.now_ms() < end) {
+                svc.display->refresh();
+                vTaskDelay(pdMS_TO_TICKS(30));
+            }
+            return;
+        }
+
+        prev_extend = extend;
+        prev_retract = retract;
+        vTaskDelay(pdMS_TO_TICKS(40));
+    }
+}
+
+void run_set_min_angle_mode(Services &svc) {
+    if (!svc.cal_meta) {
+        svc.panicf("NO META");
+    }
+
+    // Snap the stored min angle to the nearest valid step; default to LOWEST_ANGLE.
+    int cur_min = (int)svc.cal_meta->min_angle_deg;
+    if (cur_min < ANGLE_STEP || cur_min > HIGHEST_ANGLE || (cur_min % ANGLE_STEP) != 0) {
+        cur_min = DEFAULT_CAL_MIN_ANGLE;
+    }
+
+    bool prev_extend = false;
+    bool prev_retract = false;
+
+    // Drain any held buttons before entering the menu.
+    while (svc.read_extend_pressed() || svc.read_retract_pressed()) {
+        vTaskDelay(pdMS_TO_TICKS(30));
+    }
+
+    svc.display->set_refresh_rate(0.2f);
+
+    const char kDeg = (char)0xDF;
+    auto render = [&]() {
+        char line1[17];
+        snprintf(line1, sizeof(line1), "Set min: %d%c", cur_min, kDeg);
+        svc.display->print(line1, "R=Next  E=Save");
+    };
+    render();
+
+    while (1) {
+        bool extend = svc.read_extend_pressed();
+        bool retract = svc.read_retract_pressed();
+
+        // RETRACT cycles from ANGLE_STEP up to HIGHEST_ANGLE, then wraps.
+        if (retract && !prev_retract) {
+            cur_min += ANGLE_STEP;
+            if (cur_min > HIGHEST_ANGLE) cur_min = ANGLE_STEP;
+            render();
+        }
+
+        // EXTEND confirms and saves.
+        if (extend && !prev_extend) {
+            while (svc.read_extend_pressed() || svc.read_retract_pressed()) {
+                vTaskDelay(pdMS_TO_TICKS(30));
+            }
+
+            svc.cal_meta->min_angle_deg = (uint8_t)cur_min;
+            (void)wallter::calibration::save_meta(*svc.cal_meta);
+
+            char line1[17];
+            snprintf(line1, sizeof(line1), "Min: %d%c saved", cur_min, kDeg);
+            svc.display->print(line1, "");
+            uint64_t end = svc.now_ms() + 800ULL;
+            while (svc.now_ms() < end) {
+                svc.display->refresh();
+                vTaskDelay(pdMS_TO_TICKS(30));
+            }
+            return;
+        }
+
+        prev_extend = extend;
+        prev_retract = retract;
+        vTaskDelay(pdMS_TO_TICKS(40));
+    }
+}
+
+void run_set_angle_offset_mode(Services &svc) {
+    if (!svc.cal_meta) {
+        svc.panicf("NO META");
+    }
+
+    // Current offset in tenths of a degree; range -127..+127 (±12.7°).
+    int cur = (int)svc.cal_meta->angle_offset_tenths;
+
+    bool prev_extend = false;
+    bool prev_retract = false;
+
+    while (svc.read_extend_pressed() || svc.read_retract_pressed()) {
+        vTaskDelay(pdMS_TO_TICKS(30));
+    }
+
+    svc.display->set_refresh_rate(0.2f);
+
+    const char kDeg = (char)0xDF;
+    auto render = [&]() {
+        char line1[17];
+        // Show as e.g. "+1.8°" or "-0.5°"
+        char tmp[24];
+        int whole = cur / 10;
+        int frac  = (cur < 0 ? -cur : cur) % 10;
+        snprintf(tmp, sizeof(tmp), "Ofs:%+d.%d%c", whole, frac, kDeg);
+        tmp[16] = '\0';
+        strncpy(line1, tmp, sizeof(line1));
+        line1[16] = '\0';
+        svc.display->print(line1, "R=+0.1  E=Save");
+    };
+    render();
+
+    while (1) {
+        bool extend = svc.read_extend_pressed();
+        bool retract = svc.read_retract_pressed();
+
+        // RETRACT increments by 0.1°, wrapping from +12.7 back to -12.7.
+        if (retract && !prev_retract) {
+            cur++;
+            if (cur > 127) cur = -127;
+            render();
+        }
+
+        // EXTEND confirms and saves.
+        if (extend && !prev_extend) {
+            while (svc.read_extend_pressed() || svc.read_retract_pressed()) {
+                vTaskDelay(pdMS_TO_TICKS(30));
+            }
+
+            svc.cal_meta->angle_offset_tenths = (int8_t)cur;
+            (void)wallter::calibration::save_meta(*svc.cal_meta);
+
+            char tmp[24];
+            char line1[17];
+            int whole = cur / 10;
+            int frac  = (cur < 0 ? -cur : cur) % 10;
+            snprintf(tmp, sizeof(tmp), "%+d.%d%c ok", whole, frac, kDeg);
+            tmp[16] = '\0';
+            strncpy(line1, tmp, sizeof(line1));
+            line1[16] = '\0';
+            svc.display->print(line1, "");
+            uint64_t end = svc.now_ms() + 800ULL;
+            while (svc.now_ms() < end) {
+                svc.display->refresh();
+                vTaskDelay(pdMS_TO_TICKS(30));
+            }
+            return;
+        }
+
+        prev_extend = extend;
+        prev_retract = retract;
+        vTaskDelay(pdMS_TO_TICKS(40));
+    }
 }
 
 void run_self_test_sequence(Services &svc) {

@@ -4,7 +4,10 @@
 
 namespace wallter {
 
-static constexpr int kMaxAngles = ((HIGHEST_ANGLE - LOWEST_ANGLE) / ANGLE_STEP) + 1;
+// Maximum possible number of selectable targets: every ANGLE_STEP multiple from
+// ANGLE_STEP up to HIGHEST_ANGLE (e.g. 5°,10°,...,70° → 14 entries for ANGLE_STEP=5,HIGHEST_ANGLE=70).
+// The actual count after homing may be smaller depending on the measured home angle and user max.
+static constexpr int kMaxAngles = HIGHEST_ANGLE / ANGLE_STEP;
 
 inline int angle_to_index(int angle_deg) {
     if (angle_deg < LOWEST_ANGLE || angle_deg > HIGHEST_ANGLE) {

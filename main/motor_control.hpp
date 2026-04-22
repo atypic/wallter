@@ -13,7 +13,8 @@ struct Context {
     int num_motors{};
     int master_motor_index{};
 
-    uint32_t *target_ticks{};
+    uint32_t *target_ticks{};   // kept for calibration/logging only
+    float *target_angles{};     // target angle in degrees for each index
     int max_angles{};
     uint32_t *target_idx{};
 
@@ -46,6 +47,8 @@ void update_limits(int min_target_idx, int max_target_idx);
 uint8_t compute_progress_percent(int32_t current_pos, int32_t start_pos, int32_t target_pos);
 int32_t master_position();
 int32_t progress_start_ticks();
+float master_angle_deg();
+float progress_start_angle_deg();
 
 // Resets used during setup/self-test
 void reset_tick_counters(uint32_t m, bool all);

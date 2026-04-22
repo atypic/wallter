@@ -52,6 +52,7 @@ unsigned int HAL_CLK[NUM_MOTORS] = {23, 25, 27, 29};
 // Defaults for encoder interpretation / filtering.
 #define DEFAULT_CAL_MIN_ANGLE LOWEST_ANGLE
 #define DEFAULT_CAL_MAX_ANGLE HIGHEST_ANGLE
+#define DEFAULT_ACCEL_ANGLE_OFFSET_TENTHS 0
 #define HAL_DIR_FROM_MOTOR 0
 #define HAL_VALIDATE_DIR_WITH_MOTOR 0
 #define HAL_CLK_MIN_PULSE_US 0
@@ -101,6 +102,7 @@ unsigned int HAL_CLK[NUM_MOTORS] = {28, 29};  // white wires
 // Defaults for encoder interpretation / filtering.
 #define DEFAULT_CAL_MIN_ANGLE LOWEST_ANGLE
 #define DEFAULT_CAL_MAX_ANGLE HIGHEST_ANGLE
+#define DEFAULT_ACCEL_ANGLE_OFFSET_TENTHS 0
 #define HAL_DIR_FROM_MOTOR 0
 #define HAL_VALIDATE_DIR_WITH_MOTOR 0
 #define HAL_CLK_MIN_PULSE_US 0
@@ -128,14 +130,14 @@ static const bool g_has_keypad = false;
 // Default calibration range (used when NVS has no calibration meta stored).
 // Lowest usable is the mechanical home on this hardware.
 #define DEFAULT_CAL_MIN_ANGLE 30
-#define DEFAULT_CAL_MAX_ANGLE 70
+#define DEFAULT_CAL_MAX_ANGLE 60
 
 #define MASTER_MOTOR 0
 
 #define ACCEL_STEP 1
-#define MINSPEED (220)
-#define MAXSPEED (245)
-#define MASTER_MAX (230)
+#define MINSPEED (200)
+#define MAXSPEED (240)
+#define MASTER_MAX (210)
 
 #define NUM_MOTORS 2
 
@@ -178,6 +180,18 @@ static const unsigned int HAL_DIR[NUM_MOTORS] = {17, 8};
 // Motor output inversion.
 // If homing drives the wrong physical direction, set this to 1.
 #define MOTOR_OUTPUT_INVERT 0
+
+// BMA400 accelerometer (I2C_NUM_1, angle source)
+// SDO pin determines address: 0x14 = SDO->GND, 0x15 = SDO->VCC
+#define BMA400_SDA_PIN 10
+#define BMA400_SCL_PIN 9
+#define BMA400_I2C_PORT 1
+#define BMA400_I2C_ADDR 0x15
+#define BMA400_I2C_CLOCK_HZ 400000
+
+// Default accelerometer angle offset in 0.1° steps (e.g. 18 = +1.8°).
+// Used when NVS has no saved offset (old blobs store 0 in that field).
+#define DEFAULT_ACCEL_ANGLE_OFFSET_TENTHS 18
 #endif
 
 // -----------------------------------------------------------------------------
@@ -214,6 +228,7 @@ unsigned int HAL_CLK[NUM_MOTORS] = {29, 27, 25, 23};
 // Defaults for encoder interpretation / filtering.
 #define DEFAULT_CAL_MIN_ANGLE LOWEST_ANGLE
 #define DEFAULT_CAL_MAX_ANGLE HIGHEST_ANGLE
+#define DEFAULT_ACCEL_ANGLE_OFFSET_TENTHS 0
 #define HAL_DIR_FROM_MOTOR 0
 #define HAL_VALIDATE_DIR_WITH_MOTOR 0
 #define HAL_CLK_MIN_PULSE_US 0

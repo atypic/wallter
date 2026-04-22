@@ -79,7 +79,8 @@ struct CalMetaBlobV1 {
     uint32_t version;
     uint8_t min_angle_deg;
     uint8_t max_angle_deg;
-    uint8_t reserved[2];
+    int8_t  angle_offset_tenths;  // 0.1° steps
+    uint8_t reserved[1];
 };
 
 static bool is_valid_angle_setting(int angle_deg) {
@@ -285,6 +286,7 @@ esp_err_t save_from_target_ticks(const uint32_t *target_ticks, int target_len) {
 bool load_meta_or_default(CalMeta &out) {
     out.min_angle_deg = (uint8_t)DEFAULT_CAL_MIN_ANGLE;
     out.max_angle_deg = (uint8_t)DEFAULT_CAL_MAX_ANGLE;
+    out.angle_offset_tenths = (int8_t)DEFAULT_ACCEL_ANGLE_OFFSET_TENTHS;
 
     nvs_handle_t handle;
     esp_err_t err = nvs_open(kNvsNamespace, NVS_READONLY, &handle);
@@ -314,7 +316,12 @@ bool load_meta_or_default(CalMeta &out) {
 
     out.min_angle_deg = (uint8_t)min_deg;
     out.max_angle_deg = (uint8_t)max_deg;
-    ESP_LOGI(TAG, "Calibration meta loaded: min=%u max=%u", (unsigned)out.min_angle_deg, (unsigned)out.max_angle_deg);
+    // Old blobs have 0 in this field; treat 0 as "use default".
+    out.angle_offset_tenths = (blob.angle_offset_tenths != 0)
+                                  ? blob.angle_offset_tenths
+                                  : (int8_t)DEFAULT_ACCEL_ANGLE_OFFSET_TENTHS;
+    ESP_LOGI(TAG, "Calibration meta loaded: min=%u max=%u offset=%d tenths",
+             (unsigned)out.min_angle_deg, (unsigned)out.max_angle_deg, (int)out.angle_offset_tenths);
     return true;
 }
 
@@ -330,6 +337,7 @@ esp_err_t save_meta(const CalMeta &meta) {
     blob.version = 1U;
     blob.min_angle_deg = meta.min_angle_deg;
     blob.max_angle_deg = meta.max_angle_deg;
+    blob.angle_offset_tenths = meta.angle_offset_tenths;
 
     nvs_handle_t handle;
     esp_err_t err = nvs_open(kNvsNamespace, NVS_READWRITE, &handle);
@@ -347,7 +355,8 @@ esp_err_t save_meta(const CalMeta &meta) {
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "NVS meta save failed: %d", (int)err);
     } else {
-        ESP_LOGI(TAG, "Calibration meta saved: min=%u max=%u", (unsigned)meta.min_angle_deg, (unsigned)meta.max_angle_deg);
+        ESP_LOGI(TAG, "Calibration meta saved: min=%u max=%u offset=%d tenths",
+                 (unsigned)meta.min_angle_deg, (unsigned)meta.max_angle_deg, (int)meta.angle_offset_tenths);
     }
     return err;
 }

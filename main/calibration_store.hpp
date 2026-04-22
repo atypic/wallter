@@ -29,6 +29,7 @@ esp_err_t save_from_target_ticks(const uint32_t *target_ticks, int target_len);
 struct CalMeta {
 	uint8_t min_angle_deg;
 	uint8_t max_angle_deg;
+	int8_t  angle_offset_tenths;  // offset in 0.1° steps, added to raw accel angle
 };
 
 // Loads min/max angles from NVS if present; otherwise returns defaults.
