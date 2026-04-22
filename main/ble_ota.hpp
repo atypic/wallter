@@ -37,4 +37,7 @@ typedef bool (*SettingsWriteCb)(const Settings &s);
 // Register callbacks so the BLE settings characteristic can read/write cal meta.
 void set_settings_callbacks(SettingsReadCb read_cb, SettingsWriteCb write_cb);
 
+// Set the firmware version string to expose over BLE.
+void set_version_string(const char *version);
+
 } // namespace wallter::ble_ota

@@ -18,3 +18,5 @@ espidf_lcd_backup/
 android/.gradle/
 android/.idea/
 android/local.properties
+bst-bma400-ds000.pdf
+sdkconfig.esp32.bak

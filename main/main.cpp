@@ -352,6 +352,7 @@ static void setup() {
             return wallter::calibration::save_meta(g_cal_meta) == ESP_OK;
         }
     );
+    wallter::ble_ota::set_version_string(VERSION_STRING);
     wallter::ble_ota::init();
 }
 

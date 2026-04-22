@@ -42,6 +42,7 @@ data class UiState(
     val testAngleDeg: Float = 10f,
     val lastError: String? = null,
     val deviceSettings: WallterBleClient.DeviceSettings? = null,
+    val deviceFirmwareVersion: String? = null,
 )
 
 data class FirmwareAsset(
@@ -77,6 +78,7 @@ class MainViewModel : ViewModel() {
     private val availableFirmwares = MutableStateFlow<List<FirmwareAsset>>(emptyList())
     private val isLoadingFirmwares = MutableStateFlow(false)
     private val deviceSettings = MutableStateFlow<WallterBleClient.DeviceSettings?>(null)
+    private val deviceFirmwareVersion = MutableStateFlow<String?>(null)
 
     val uiState: StateFlow<UiState> = combine(
         permissionsGranted,
@@ -104,6 +106,7 @@ class MainViewModel : ViewModel() {
         .combine(availableFirmwares) { s, list -> s.copy(availableFirmwares = list) }
         .combine(isLoadingFirmwares) { s, loading -> s.copy(isLoadingFirmwares = loading) }
         .combine(deviceSettings) { s, ds -> s.copy(deviceSettings = ds) }
+        .combine(deviceFirmwareVersion) { s, v -> s.copy(deviceFirmwareVersion = v) }
         .stateIn(viewModelScope, kotlinx.coroutines.flow.SharingStarted.Eagerly, UiState())
 
     fun onPermissionsResult(grants: Map<String, Boolean>) {
@@ -320,7 +323,8 @@ class MainViewModel : ViewModel() {
                     val size = asset.optLong("size", -1L).coerceAtLeast(0L)
                     if (name.isBlank() || dl.isBlank()) continue
 
-                    if (!name.endsWith(".bin", ignoreCase = true)) continue
+                    // Only show the OTA binary (skip the bare wallter.bin duplicate and .sha256 files).
+                    if (!name.endsWith("-ota.bin", ignoreCase = true)) continue
 
                     out += FirmwareAsset(
                         name = name,
@@ -394,7 +398,7 @@ class MainViewModel : ViewModel() {
                 withContext(Dispatchers.IO) {
                     val bytes = if (uri != null) {
                         context.contentResolver.openInputStream(uri).use { input ->
-                            if (input == null) throw IllegalStateException("Unable to open firmware")
+                            if (input == null) throw IllegalStateException("Unable to open firmware file")
                             input.readBytes()
                         }
                     } else {
@@ -402,39 +406,51 @@ class MainViewModel : ViewModel() {
                         downloadFirmware(url!!)
                     }
 
-                        val sha256 = MessageDigest.getInstance("SHA-256").digest(bytes)
+                    val sizeKb = bytes.size / 1024
+                    otaStatusText.value = "Preparing… (${sizeKb} KB)"
+                    val sha256 = MessageDigest.getInstance("SHA-256").digest(bytes)
 
-                        otaStatusText.value = "BEGIN"
-                        c.otaBegin(imageSize = bytes.size, sha256 = sha256)
+                    otaStatusText.value = "Sending to device…"
+                    c.otaBegin(imageSize = bytes.size, sha256 = sha256)
 
-                        otaStatusText.value = "Streaming…"
-                        val chunkSize = 240
-                        var offset = 0
-                        while (offset < bytes.size) {
-                            val end = minOf(offset + chunkSize, bytes.size)
-                            c.otaWriteChunk(bytes.copyOfRange(offset, end))
-                            offset = end
-                            otaProgress.value = offset.toFloat() / bytes.size.toFloat()
+                    // Verify the device accepted the begin command.
+                    delay(200)
+                    val beginStatus = c.readOtaStatus()
+                    if (beginStatus != null && beginStatus.state == 3) {
+                        throw IllegalStateException("Device rejected OTA begin (error ${beginStatus.lastErr}). Is another OTA in progress?")
+                    }
+                    if (beginStatus != null && beginStatus.state != 1) {
+                        throw IllegalStateException("Device not in receiving state (state=${beginStatus.state}). Try rebooting the device.")
+                    }
+
+                    val chunkSize = 240
+                    var offset = 0
+                    while (offset < bytes.size) {
+                        val end = minOf(offset + chunkSize, bytes.size)
+                        c.otaWriteChunk(bytes.copyOfRange(offset, end))
+                        offset = end
+                        otaProgress.value = offset.toFloat() / bytes.size.toFloat()
+                    }
+
+                    otaStatusText.value = "Verifying…"
+                    c.otaEnd()
+
+                    // Wait for Ready (either via notifications or polling reads).
+                    val deadline = System.currentTimeMillis() + 30_000
+                    while (System.currentTimeMillis() < deadline) {
+                        val st = c.readOtaStatus()
+                        if (st != null && st.state == 2 && st.lastErr == 0) {
+                            otaStatusText.value = "Done! Reboot to activate."
+                            otaProgress.value = 1f
+                            return@withContext
                         }
-
-                        otaStatusText.value = "END"
-                        c.otaEnd()
-
-                        // Wait for Ready (either via notifications or polling reads).
-                        val deadline = System.currentTimeMillis() + 30_000
-                        while (System.currentTimeMillis() < deadline) {
-                            val st = c.readOtaStatus()
-                            if (st != null && st.state == 2 && st.lastErr == 0) {
-                                otaStatusText.value = "Ready"
-                                otaProgress.value = 1f
-                                return@withContext
-                            }
-                            if (st != null && st.state == 3) {
-                                throw IllegalStateException("Device reported error")
-                            }
-                            delay(500)
+                        if (st != null && st.state == 3) {
+                            val errCode = st.lastErr
+                            throw IllegalStateException("Device rejected firmware (error $errCode). Check firmware compatibility.")
                         }
-                        throw IllegalStateException("Timed out waiting for Ready")
+                        delay(500)
+                    }
+                    throw IllegalStateException("Device did not confirm update within 30 s. Try rebooting.")
                 }
             } catch (t: Throwable) {
                 otaStatusText.value = "Error"
@@ -509,8 +525,14 @@ class MainViewModel : ViewModel() {
                     if (!connected) {
                         currentAngleDeg.value = null
                         lastAngleUpdateMs = 0L
+                        deviceFirmwareVersion.value = null
                         return@collect
                     }
+
+                    // Read firmware version once on connect.
+                    try {
+                        deviceFirmwareVersion.value = c.readVersion()
+                    } catch (_: Throwable) {}
 
                     // Seed test angle from the first read if possible.
                     while (c.isConnected.value) {

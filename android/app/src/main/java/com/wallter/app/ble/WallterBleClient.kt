@@ -63,6 +63,7 @@ class WallterBleClient(private val context: Context) {
     private var buttons: BluetoothGattCharacteristic? = null
     private var angle: BluetoothGattCharacteristic? = null
     private var settings: BluetoothGattCharacteristic? = null
+    private var version: BluetoothGattCharacteristic? = null
 
     private val opMutex = Mutex()
 
@@ -259,6 +260,12 @@ class WallterBleClient(private val context: Context) {
         writeCharacteristic(chr, payload)
     }
 
+    suspend fun readVersion(): String? {
+        val chr = version ?: return null
+        val bytes = readCharacteristic(chr)
+        return if (bytes.isNotEmpty()) String(bytes, Charsets.UTF_8) else null
+    }
+
     suspend fun otaBegin(imageSize: Int, sha256: ByteArray?) {
         val ctrl = otaCtrl ?: throw IOException("OTA control characteristic not found")
 
@@ -283,7 +290,7 @@ class WallterBleClient(private val context: Context) {
 
     suspend fun otaWriteChunk(chunk: ByteArray) {
         val data = otaData ?: throw IOException("OTA data characteristic not found")
-        writeCharacteristic(data, chunk)
+        writeCharacteristicNoResponse(data, chunk)
     }
 
     suspend fun otaEnd() {
@@ -364,8 +371,26 @@ class WallterBleClient(private val context: Context) {
 
             val status = withTimeout(15_000) { deferred.await() }
             if (status != BluetoothGatt.GATT_SUCCESS) {
-                throw IOException("GATT characteristic write failed: $status")
+                throw IOException("GATT characteristic write failed: ${gattStatusString(status)}")
             }
+        }
+    }
+
+    private suspend fun writeCharacteristicNoResponse(chr: BluetoothGattCharacteristic, value: ByteArray) {
+        val g = gatt ?: throw IOException("Not connected")
+
+        opMutex.withLock {
+            chr.writeType = BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE
+            chr.value = value
+
+            @SuppressLint("MissingPermission")
+            val ok = g.writeCharacteristic(chr)
+            if (!ok) {
+                throw IOException("writeCharacteristic (no-response) returned false")
+            }
+            // No callback to wait for; write-without-response is fire-and-forget.
+            // Small delay to avoid overwhelming the BLE controller queue.
+            delay(2)
         }
     }
 
@@ -389,9 +414,26 @@ class WallterBleClient(private val context: Context) {
 
             val status = withTimeout(10_000) { deferred.await() }
             if (status != BluetoothGatt.GATT_SUCCESS) {
-                throw IOException("GATT descriptor write failed: $status")
+                throw IOException("GATT descriptor write failed: ${gattStatusString(status)}")
             }
         }
+    }
+
+    private fun gattStatusString(status: Int): String {
+        val name = when (status) {
+            0 -> "Success"
+            2 -> "Read not permitted"
+            3 -> "Write not permitted"
+            5 -> "Insufficient authentication"
+            6 -> "Request not supported"
+            7 -> "Invalid offset"
+            13 -> "Invalid attribute length"
+            14 -> "Unlikely error (device rejected operation)"
+            15 -> "Insufficient encryption"
+            133 -> "Generic GATT error"
+            else -> "Unknown"
+        }
+        return "$status ($name)"
     }
 
     private val gattCallback = object : BluetoothGattCallback() {
@@ -441,6 +483,7 @@ class WallterBleClient(private val context: Context) {
             buttons = findCharacteristicAny(gatt, WallterUuids.BUTTONS)
             angle = findCharacteristicAny(gatt, WallterUuids.ANGLE)
             settings = findCharacteristicAny(gatt, WallterUuids.SETTINGS)
+            version = findCharacteristicAny(gatt, WallterUuids.VERSION)
 
             if (buttons == null) {
                 Log.e(TAG, "Buttons characteristic not found after service discovery")

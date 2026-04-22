@@ -6,6 +6,7 @@ import android.content.pm.PackageManager
 import android.os.Build
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -14,7 +15,10 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
@@ -30,6 +34,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.viewmodel.compose.viewModel
@@ -126,11 +131,13 @@ fun WallterApp(viewModel: MainViewModel) {
             } else {
                 MaintenanceSection(
                     enabled = ui.isConnected,
-                    firmwareName = ui.firmwareName,
+                    selectedUrl = ui.firmwareUrl,
                     availableFirmwares = ui.availableFirmwares,
                     isLoadingFirmwares = ui.isLoadingFirmwares,
                     progress = ui.otaProgress,
                     statusText = ui.otaStatusText,
+                    otaError = ui.lastError,
+                    deviceFirmwareVersion = ui.deviceFirmwareVersion,
                     onSelectFirmware = { asset -> viewModel.setFirmwareFromUrl(asset.name, asset.downloadUrl) },
                     onStartOta = { viewModel.startOta(context) },
                     onReboot = { viewModel.reboot() },
@@ -218,36 +225,77 @@ private fun ControlSection(
 @Composable
 private fun MaintenanceSection(
     enabled: Boolean,
-    firmwareName: String?,
+    selectedUrl: String?,
     availableFirmwares: List<FirmwareAsset>,
     isLoadingFirmwares: Boolean,
     progress: Float,
     statusText: String,
+    otaError: String?,
+    deviceFirmwareVersion: String?,
     onSelectFirmware: (FirmwareAsset) -> Unit,
     onStartOta: () -> Unit,
     onReboot: () -> Unit,
 ) {
+    val isOtaRunning = statusText in listOf("Preparing…", "Downloading…", "Sending to device…", "Verifying…")
+    var showConfirmDialog by remember { mutableStateOf(false) }
+
+    if (showConfirmDialog) {
+        AlertDialog(
+            onDismissRequest = { showConfirmDialog = false },
+            title = { Text("Start firmware update?") },
+            text = {
+                Text("The device will be unavailable during the update. " +
+                     "Do not disconnect or power off until it completes.")
+            },
+            confirmButton = {
+                Button(onClick = {
+                    showConfirmDialog = false
+                    onStartOta()
+                }) { Text("Update") }
+            },
+            dismissButton = {
+                OutlinedButton(onClick = { showConfirmDialog = false }) {
+                    Text("Cancel")
+                }
+            },
+        )
+    }
+
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Text("Firmware Update", style = MaterialTheme.typography.titleMedium)
-        Text("Selected: ${firmwareName ?: "(none)"}")
-        Text("Status: $statusText")
-        Text("Progress: ${(progress * 100).toInt()}%")
 
-        Button(onClick = onStartOta, enabled = enabled && firmwareName != null) { Text("Start") }
+        if (deviceFirmwareVersion != null) {
+            Text(
+                "Device: $deviceFirmwareVersion",
+                style = MaterialTheme.typography.bodyMedium,
+                fontWeight = FontWeight.SemiBold,
+            )
+        }
 
+        // --- Firmware list ---
         Text(
             if (availableFirmwares.isEmpty()) {
                 if (isLoadingFirmwares) "Loading firmwares…" else "No firmwares loaded"
             } else {
-                "Available firmwares"
-            }
+                "Select firmware:"
+            },
+            style = MaterialTheme.typography.bodyMedium,
         )
 
         for (asset in availableFirmwares) {
+            val isSelected = asset.downloadUrl == selectedUrl
             OutlinedButton(
                 onClick = { onSelectFirmware(asset) },
-                enabled = true,
+                enabled = !isOtaRunning,
                 modifier = Modifier.fillMaxWidth(),
+                border = BorderStroke(
+                    width = if (isSelected) 2.dp else 1.dp,
+                    color = if (isSelected) MaterialTheme.colorScheme.primary
+                            else MaterialTheme.colorScheme.outline,
+                ),
+                colors = if (isSelected) ButtonDefaults.outlinedButtonColors(
+                    containerColor = MaterialTheme.colorScheme.primaryContainer,
+                ) else ButtonDefaults.outlinedButtonColors(),
             ) {
                 val sizeKb = (asset.sizeBytes / 1024L).toInt()
                 val label = buildString {
@@ -258,11 +306,50 @@ private fun MaintenanceSection(
             }
         }
 
+        // --- OTA controls ---
+        Button(
+            onClick = { showConfirmDialog = true },
+            enabled = enabled && selectedUrl != null && !isOtaRunning,
+            modifier = Modifier.fillMaxWidth(),
+        ) { Text(if (isOtaRunning) statusText else "Start OTA") }
+
+        if (isOtaRunning || progress > 0f) {
+            LinearProgressIndicator(
+                progress = { progress },
+                modifier = Modifier.fillMaxWidth().height(6.dp),
+            )
+            Text(
+                "${statusText} — ${(progress * 100).toInt()}%",
+                style = MaterialTheme.typography.bodySmall,
+            )
+        } else if (statusText != "Idle") {
+            Text(
+                statusText,
+                style = MaterialTheme.typography.bodySmall,
+                color = if (statusText == "Error") MaterialTheme.colorScheme.error
+                        else MaterialTheme.colorScheme.onSurface,
+            )
+        }
+
+        if (otaError != null) {
+            Text(
+                otaError,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.error,
+            )
+        }
+
+        if (statusText == "Done! Reboot to activate.") {
+            Button(
+                onClick = onReboot,
+                enabled = enabled,
+                modifier = Modifier.fillMaxWidth(),
+            ) { Text("Reboot device") }
+        }
+
         Spacer(modifier = Modifier.height(8.dp))
         Text("About", style = MaterialTheme.typography.titleMedium)
         Text("Wallter ${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE})")
-        Text("Firmware source: GitHub Releases (${BuildConfig.GITHUB_OWNER}/${BuildConfig.GITHUB_REPO})")
-        Text("If needed: provide GitHub token at build time (github.token or GITHUB_TOKEN)")
 
         OutlinedButton(onClick = onReboot, enabled = enabled) { Text("Reboot") }
     }

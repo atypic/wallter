@@ -65,6 +65,10 @@ static const ble_uuid128_t kSettingsUuid = BLE_UUID128_INIT(
     0x9a, 0x9b, 0x5a, 0x7d, 0x4d, 0x2a, 0x4d, 0x2f,
     0x9e, 0x2c, 0x8d, 0x7c, 0x34, 0x02, 0x08, 0x00);
 
+static const ble_uuid128_t kVersionUuid = BLE_UUID128_INIT(
+    0x9a, 0x9b, 0x5a, 0x7d, 0x4d, 0x2a, 0x4d, 0x2f,
+    0x9e, 0x2c, 0x8d, 0x7c, 0x34, 0x02, 0x09, 0x00);
+
 enum : uint8_t {
     kOpBegin = 0x01,
     kOpData = 0x02,
@@ -136,6 +140,12 @@ void set_current_angle_deg(float angle_deg) {
 void set_settings_callbacks(SettingsReadCb read_cb, SettingsWriteCb write_cb) {
     g_settings_read_cb = read_cb;
     g_settings_write_cb = write_cb;
+}
+
+static const char *g_version_string = nullptr;
+
+void set_version_string(const char *version) {
+    g_version_string = version;
 }
 
 ButtonEvents poll_button_events() {
@@ -381,6 +391,16 @@ static int gatt_access_settings(uint16_t /*conn_handle*/, uint16_t /*attr_handle
     return BLE_ATT_ERR_UNLIKELY;
 }
 
+static int gatt_access_version(uint16_t /*conn_handle*/, uint16_t /*attr_handle*/,
+                               struct ble_gatt_access_ctxt *ctxt, void * /*arg*/) {
+    if (ctxt->op == BLE_GATT_ACCESS_OP_READ_CHR) {
+        const char *v = g_version_string ? g_version_string : "unknown";
+        int rc = os_mbuf_append(ctxt->om, v, strlen(v));
+        return (rc == 0) ? 0 : BLE_ATT_ERR_INSUFFICIENT_RES;
+    }
+    return BLE_ATT_ERR_UNLIKELY;
+}
+
 static const struct ble_gatt_svc_def gatt_svcs[] = {
     {
         .type = BLE_GATT_SVC_TYPE_PRIMARY,
@@ -402,7 +422,7 @@ static const struct ble_gatt_svc_def gatt_svcs[] = {
                 .access_cb = gatt_access_data,
                 .arg = nullptr,
                 .descriptors = nullptr,
-                .flags = BLE_GATT_CHR_F_WRITE,
+                .flags = BLE_GATT_CHR_F_WRITE | BLE_GATT_CHR_F_WRITE_NO_RSP,
                 .min_key_size = 0,
                 .val_handle = nullptr,
                 .cpfd = nullptr,
@@ -460,6 +480,16 @@ static const struct ble_gatt_svc_def gatt_svcs[] = {
                 .arg = nullptr,
                 .descriptors = nullptr,
                 .flags = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_WRITE,
+                .min_key_size = 0,
+                .val_handle = nullptr,
+                .cpfd = nullptr,
+            },
+            {
+                .uuid = &kVersionUuid.u,
+                .access_cb = gatt_access_version,
+                .arg = nullptr,
+                .descriptors = nullptr,
+                .flags = BLE_GATT_CHR_F_READ,
                 .min_key_size = 0,
                 .val_handle = nullptr,
                 .cpfd = nullptr,
