@@ -62,6 +62,7 @@ class WallterBleClient(private val context: Context) {
     private var otaStatus: BluetoothGattCharacteristic? = null
     private var buttons: BluetoothGattCharacteristic? = null
     private var angle: BluetoothGattCharacteristic? = null
+    private var settings: BluetoothGattCharacteristic? = null
 
     private val opMutex = Mutex()
 
@@ -229,6 +230,33 @@ class WallterBleClient(private val context: Context) {
             ((bytes[2].toInt() and 0xff) shl 16) or
             ((bytes[3].toInt() and 0xff) shl 24)
         return Float.fromBits(bits)
+    }
+
+    data class DeviceSettings(
+        val minAngleDeg: Int,
+        val maxAngleDeg: Int,
+        val angleOffsetTenths: Int,
+    )
+
+    suspend fun readSettings(): DeviceSettings? {
+        val chr = settings ?: return null
+        val bytes = readCharacteristic(chr)
+        if (bytes.size < 3) return null
+        return DeviceSettings(
+            minAngleDeg = bytes[0].toInt() and 0xFF,
+            maxAngleDeg = bytes[1].toInt() and 0xFF,
+            angleOffsetTenths = bytes[2].toInt(),  // signed
+        )
+    }
+
+    suspend fun writeSettings(s: DeviceSettings) {
+        val chr = settings ?: throw IOException("Settings characteristic not found")
+        val payload = byteArrayOf(
+            s.minAngleDeg.toByte(),
+            s.maxAngleDeg.toByte(),
+            s.angleOffsetTenths.toByte(),
+        )
+        writeCharacteristic(chr, payload)
     }
 
     suspend fun otaBegin(imageSize: Int, sha256: ByteArray?) {
@@ -412,6 +440,7 @@ class WallterBleClient(private val context: Context) {
             otaStatus = findCharacteristicAny(gatt, WallterUuids.OTA_STATUS)
             buttons = findCharacteristicAny(gatt, WallterUuids.BUTTONS)
             angle = findCharacteristicAny(gatt, WallterUuids.ANGLE)
+            settings = findCharacteristicAny(gatt, WallterUuids.SETTINGS)
 
             if (buttons == null) {
                 Log.e(TAG, "Buttons characteristic not found after service discovery")

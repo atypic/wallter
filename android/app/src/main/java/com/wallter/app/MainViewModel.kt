@@ -41,6 +41,7 @@ data class UiState(
     val currentAngleDeg: Float? = null,
     val testAngleDeg: Float = 10f,
     val lastError: String? = null,
+    val deviceSettings: WallterBleClient.DeviceSettings? = null,
 )
 
 data class FirmwareAsset(
@@ -75,6 +76,7 @@ class MainViewModel : ViewModel() {
 
     private val availableFirmwares = MutableStateFlow<List<FirmwareAsset>>(emptyList())
     private val isLoadingFirmwares = MutableStateFlow(false)
+    private val deviceSettings = MutableStateFlow<WallterBleClient.DeviceSettings?>(null)
 
     val uiState: StateFlow<UiState> = combine(
         permissionsGranted,
@@ -101,6 +103,7 @@ class MainViewModel : ViewModel() {
         .combine(firmwareUrl) { s, url -> s.copy(firmwareUrl = url) }
         .combine(availableFirmwares) { s, list -> s.copy(availableFirmwares = list) }
         .combine(isLoadingFirmwares) { s, loading -> s.copy(isLoadingFirmwares = loading) }
+        .combine(deviceSettings) { s, ds -> s.copy(deviceSettings = ds) }
         .stateIn(viewModelScope, kotlinx.coroutines.flow.SharingStarted.Eagerly, UiState())
 
     fun onPermissionsResult(grants: Map<String, Boolean>) {
@@ -338,6 +341,37 @@ class MainViewModel : ViewModel() {
         viewModelScope.launch {
             try {
                 c.reboot()
+            } catch (t: Throwable) {
+                lastError.value = t.message ?: t.toString()
+            }
+        }
+    }
+
+    fun refreshDeviceSettings() {
+        val c = client ?: return
+        viewModelScope.launch {
+            try {
+                lastError.value = null
+                val s = c.readSettings()
+                deviceSettings.value = s
+            } catch (t: Throwable) {
+                lastError.value = t.message ?: t.toString()
+            }
+        }
+    }
+
+    fun saveDeviceSettings(minAngle: Int, maxAngle: Int, offsetTenths: Int) {
+        val c = client ?: return
+        viewModelScope.launch {
+            try {
+                lastError.value = null
+                val s = WallterBleClient.DeviceSettings(
+                    minAngleDeg = minAngle,
+                    maxAngleDeg = maxAngle,
+                    angleOffsetTenths = offsetTenths,
+                )
+                c.writeSettings(s)
+                deviceSettings.value = s
             } catch (t: Throwable) {
                 lastError.value = t.message ?: t.toString()
             }

@@ -336,6 +336,22 @@ static void setup() {
     display.set_view(LCD_HOMING_VIEW);
 
     // BLE OTA service (runs in background tasks when enabled).
+    wallter::ble_ota::set_settings_callbacks(
+        []() -> wallter::ble_ota::Settings {
+            return {
+                .min_angle_deg = g_cal_meta.min_angle_deg,
+                .max_angle_deg = g_cal_meta.max_angle_deg,
+                .angle_offset_tenths = g_cal_meta.angle_offset_tenths,
+            };
+        },
+        [](const wallter::ble_ota::Settings &s) -> bool {
+            g_cal_meta.min_angle_deg = s.min_angle_deg;
+            g_cal_meta.max_angle_deg = s.max_angle_deg;
+            g_cal_meta.angle_offset_tenths = s.angle_offset_tenths;
+            wallter::accel::set_angle_offset((float)s.angle_offset_tenths * 0.1f);
+            return wallter::calibration::save_meta(g_cal_meta) == ESP_OK;
+        }
+    );
     wallter::ble_ota::init();
 }
 

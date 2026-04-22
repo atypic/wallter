@@ -61,6 +61,10 @@ static const ble_uuid128_t kAngleUuid = BLE_UUID128_INIT(
     0x9a, 0x9b, 0x5a, 0x7d, 0x4d, 0x2a, 0x4d, 0x2f,
     0x9e, 0x2c, 0x8d, 0x7c, 0x34, 0x02, 0x07, 0x00);
 
+static const ble_uuid128_t kSettingsUuid = BLE_UUID128_INIT(
+    0x9a, 0x9b, 0x5a, 0x7d, 0x4d, 0x2a, 0x4d, 0x2f,
+    0x9e, 0x2c, 0x8d, 0x7c, 0x34, 0x02, 0x08, 0x00);
+
 enum : uint8_t {
     kOpBegin = 0x01,
     kOpData = 0x02,
@@ -107,6 +111,10 @@ static uint16_t g_angle_val_handle = 0;
 
 static volatile uint8_t g_btn_events = 0;
 
+// Calibration settings read/write callbacks (set by main).
+static SettingsReadCb  g_settings_read_cb  = nullptr;
+static SettingsWriteCb g_settings_write_cb = nullptr;
+
 // Angle is stored as raw float32 bits to avoid tearing.
 static uint32_t g_angle_bits = 0;
 
@@ -123,6 +131,11 @@ void set_current_angle_deg(float angle_deg) {
     static_assert(sizeof(bits) == sizeof(angle_deg));
     memcpy(&bits, &angle_deg, sizeof(bits));
     angle_bits_set(bits);
+}
+
+void set_settings_callbacks(SettingsReadCb read_cb, SettingsWriteCb write_cb) {
+    g_settings_read_cb = read_cb;
+    g_settings_write_cb = write_cb;
 }
 
 ButtonEvents poll_button_events() {
@@ -343,6 +356,31 @@ static int gatt_access_angle(uint16_t /*conn_handle*/, uint16_t /*attr_handle*/,
     return (rc == 0) ? 0 : BLE_ATT_ERR_INSUFFICIENT_RES;
 }
 
+static int gatt_access_settings(uint16_t /*conn_handle*/, uint16_t /*attr_handle*/,
+                                struct ble_gatt_access_ctxt *ctxt, void * /*arg*/) {
+    if (ctxt->op == BLE_GATT_ACCESS_OP_READ_CHR) {
+        if (!g_settings_read_cb) return BLE_ATT_ERR_UNLIKELY;
+        Settings s = g_settings_read_cb();
+        uint8_t buf[3] = {s.min_angle_deg, s.max_angle_deg, (uint8_t)s.angle_offset_tenths};
+        int rc = os_mbuf_append(ctxt->om, buf, sizeof(buf));
+        return (rc == 0) ? 0 : BLE_ATT_ERR_INSUFFICIENT_RES;
+    }
+    if (ctxt->op == BLE_GATT_ACCESS_OP_WRITE_CHR) {
+        uint8_t buf[3] = {0};
+        uint16_t copied = 0;
+        int rc = ble_hs_mbuf_to_flat(ctxt->om, buf, sizeof(buf), &copied);
+        if (rc != 0 || copied < 3) return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
+        if (!g_settings_write_cb) return BLE_ATT_ERR_UNLIKELY;
+        Settings s;
+        s.min_angle_deg = buf[0];
+        s.max_angle_deg = buf[1];
+        s.angle_offset_tenths = (int8_t)buf[2];
+        bool ok = g_settings_write_cb(s);
+        return ok ? 0 : BLE_ATT_ERR_UNLIKELY;
+    }
+    return BLE_ATT_ERR_UNLIKELY;
+}
+
 static const struct ble_gatt_svc_def gatt_svcs[] = {
     {
         .type = BLE_GATT_SVC_TYPE_PRIMARY,
@@ -414,6 +452,16 @@ static const struct ble_gatt_svc_def gatt_svcs[] = {
                 .flags = BLE_GATT_CHR_F_READ,
                 .min_key_size = 0,
                 .val_handle = &g_angle_val_handle,
+                .cpfd = nullptr,
+            },
+            {
+                .uuid = &kSettingsUuid.u,
+                .access_cb = gatt_access_settings,
+                .arg = nullptr,
+                .descriptors = nullptr,
+                .flags = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_WRITE,
+                .min_key_size = 0,
+                .val_handle = nullptr,
                 .cpfd = nullptr,
             },
             {

@@ -17,6 +17,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -134,6 +135,15 @@ fun WallterApp(viewModel: MainViewModel) {
                     onStartOta = { viewModel.startOta(context) },
                     onReboot = { viewModel.reboot() },
                 )
+
+                Spacer(modifier = Modifier.height(8.dp))
+
+                DeviceSettingsSection(
+                    enabled = ui.isConnected,
+                    settings = ui.deviceSettings,
+                    onRefresh = { viewModel.refreshDeviceSettings() },
+                    onSave = { min, max, offset -> viewModel.saveDeviceSettings(min, max, offset) },
+                )
             }
 
             if (!ui.permissionsGranted) {
@@ -240,7 +250,11 @@ private fun MaintenanceSection(
                 modifier = Modifier.fillMaxWidth(),
             ) {
                 val sizeKb = (asset.sizeBytes / 1024L).toInt()
-                Text("${asset.name} (${sizeKb} KB)")
+                val label = buildString {
+                    if (asset.releaseName != null) append("${asset.releaseName} — ")
+                    append("${asset.name} (${sizeKb} KB)")
+                }
+                Text(label)
             }
         }
 
@@ -251,5 +265,58 @@ private fun MaintenanceSection(
         Text("If needed: provide GitHub token at build time (github.token or GITHUB_TOKEN)")
 
         OutlinedButton(onClick = onReboot, enabled = enabled) { Text("Reboot") }
+    }
+}
+
+@Composable
+private fun DeviceSettingsSection(
+    enabled: Boolean,
+    settings: com.wallter.app.ble.WallterBleClient.DeviceSettings?,
+    onRefresh: () -> Unit,
+    onSave: (minAngle: Int, maxAngle: Int, offsetTenths: Int) -> Unit,
+) {
+    var minAngle by remember(settings) { mutableStateOf(settings?.minAngleDeg?.toString() ?: "") }
+    var maxAngle by remember(settings) { mutableStateOf(settings?.maxAngleDeg?.toString() ?: "") }
+    var offsetTenths by remember(settings) { mutableStateOf(settings?.angleOffsetTenths?.toString() ?: "") }
+
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Text("Device Settings", style = MaterialTheme.typography.titleMedium)
+
+        OutlinedButton(onClick = onRefresh, enabled = enabled) {
+            Text("Read from device")
+        }
+
+        if (settings != null) {
+            OutlinedTextField(
+                value = minAngle,
+                onValueChange = { minAngle = it },
+                label = { Text("Min angle (°)") },
+                modifier = Modifier.fillMaxWidth(),
+            )
+            OutlinedTextField(
+                value = maxAngle,
+                onValueChange = { maxAngle = it },
+                label = { Text("Max angle (°)") },
+                modifier = Modifier.fillMaxWidth(),
+            )
+            OutlinedTextField(
+                value = offsetTenths,
+                onValueChange = { offsetTenths = it },
+                label = { Text("Angle offset (0.1° steps)") },
+                modifier = Modifier.fillMaxWidth(),
+            )
+
+            Button(
+                onClick = {
+                    val min = minAngle.toIntOrNull() ?: return@Button
+                    val max = maxAngle.toIntOrNull() ?: return@Button
+                    val ofs = offsetTenths.toIntOrNull() ?: return@Button
+                    onSave(min, max, ofs)
+                },
+                enabled = enabled,
+            ) {
+                Text("Save to device")
+            }
+        }
     }
 }
