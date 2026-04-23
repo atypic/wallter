@@ -44,4 +44,13 @@ esp_err_t save_meta(const CalMeta &meta);
 // Deletes stored calibration data from NVS (ticks + meta). Next boot/load will use defaults.
 esp_err_t erase_calibration();
 
+// Maximum length for the BLE device name (must fit in advertisement).
+static constexpr int kMaxDeviceNameLen = 20;
+
+// Load custom device name from NVS.  Returns false (and fills default) if not stored.
+bool load_device_name(char *out, int max_len);
+
+// Save custom device name to NVS.
+esp_err_t save_device_name(const char *name);
+
 } // namespace wallter::calibration

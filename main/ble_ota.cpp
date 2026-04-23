@@ -69,6 +69,10 @@ static const ble_uuid128_t kVersionUuid = BLE_UUID128_INIT(
     0x9a, 0x9b, 0x5a, 0x7d, 0x4d, 0x2a, 0x4d, 0x2f,
     0x9e, 0x2c, 0x8d, 0x7c, 0x34, 0x02, 0x09, 0x00);
 
+static const ble_uuid128_t kDevNameUuid = BLE_UUID128_INIT(
+    0x9a, 0x9b, 0x5a, 0x7d, 0x4d, 0x2a, 0x4d, 0x2f,
+    0x9e, 0x2c, 0x8d, 0x7c, 0x34, 0x02, 0x0A, 0x00);
+
 enum : uint8_t {
     kOpBegin = 0x01,
     kOpData = 0x02,
@@ -146,6 +150,23 @@ static const char *g_version_string = nullptr;
 
 void set_version_string(const char *version) {
     g_version_string = version;
+}
+
+// Device name write callback (set by main).
+static DeviceNameWriteCb g_devname_write_cb = nullptr;
+
+// Device name buffer used at BLE init and updated on writes.
+static char g_device_name[32] = "wallter";
+
+void set_device_name_callbacks(DeviceNameWriteCb write_cb) {
+    g_devname_write_cb = write_cb;
+}
+
+void set_device_name(const char *name) {
+    if (name && name[0]) {
+        strncpy(g_device_name, name, sizeof(g_device_name) - 1);
+        g_device_name[sizeof(g_device_name) - 1] = '\0';
+    }
 }
 
 ButtonEvents poll_button_events() {
@@ -404,6 +425,29 @@ static int gatt_access_version(uint16_t /*conn_handle*/, uint16_t /*attr_handle*
     return BLE_ATT_ERR_UNLIKELY;
 }
 
+static int gatt_access_devname(uint16_t /*conn_handle*/, uint16_t /*attr_handle*/,
+                               struct ble_gatt_access_ctxt *ctxt, void * /*arg*/) {
+    if (ctxt->op == BLE_GATT_ACCESS_OP_READ_CHR) {
+        const char *name = ble_svc_gap_device_name();
+        int rc = os_mbuf_append(ctxt->om, name, strlen(name));
+        return (rc == 0) ? 0 : BLE_ATT_ERR_INSUFFICIENT_RES;
+    }
+    if (ctxt->op == BLE_GATT_ACCESS_OP_WRITE_CHR) {
+        char buf[32] = {0};
+        uint16_t copied = 0;
+        int rc = ble_hs_mbuf_to_flat(ctxt->om, buf, sizeof(buf) - 1, &copied);
+        if (rc != 0 || copied == 0) return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
+        buf[copied] = '\0';
+        if (!g_devname_write_cb) return BLE_ATT_ERR_UNLIKELY;
+        bool ok = g_devname_write_cb(buf);
+        if (ok) {
+            ble_svc_gap_device_name_set(buf);
+        }
+        return ok ? 0 : BLE_ATT_ERR_UNLIKELY;
+    }
+    return BLE_ATT_ERR_UNLIKELY;
+}
+
 static const struct ble_gatt_svc_def gatt_svcs[] = {
     {
         .type = BLE_GATT_SVC_TYPE_PRIMARY,
@@ -493,6 +537,16 @@ static const struct ble_gatt_svc_def gatt_svcs[] = {
                 .arg = nullptr,
                 .descriptors = nullptr,
                 .flags = BLE_GATT_CHR_F_READ,
+                .min_key_size = 0,
+                .val_handle = nullptr,
+                .cpfd = nullptr,
+            },
+            {
+                .uuid = &kDevNameUuid.u,
+                .access_cb = gatt_access_devname,
+                .arg = nullptr,
+                .descriptors = nullptr,
+                .flags = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_WRITE,
                 .min_key_size = 0,
                 .val_handle = nullptr,
                 .cpfd = nullptr,
@@ -651,7 +705,7 @@ void init() {
     ble_svc_gap_init();
     ble_svc_gatt_init();
 
-    rc = ble_svc_gap_device_name_set("wallter");
+    rc = ble_svc_gap_device_name_set(g_device_name);
     if (rc != 0) {
         ESP_LOGE(TAG, "ble_svc_gap_device_name_set failed: %d", rc);
         return;

@@ -160,10 +160,12 @@ fun WallterApp(viewModel: MainViewModel) {
 
                     DeviceSettingsSection(
                         settings = ui.deviceSettings,
+                        deviceName = ui.deviceName,
                         onRefresh = { viewModel.refreshDeviceSettings() },
                         onSave = { min, max, offset, extSpd, retSpd ->
                         viewModel.saveDeviceSettings(min, max, offset, extSpd, retSpd)
                     },
+                        onSaveName = { viewModel.saveDeviceName(it) },
                     )
                 }
             }
@@ -374,8 +376,10 @@ private fun MaintenanceSection(
 @Composable
 private fun DeviceSettingsSection(
     settings: com.wallter.app.ble.WallterBleClient.DeviceSettings?,
+    deviceName: String?,
     onRefresh: () -> Unit,
     onSave: (minAngle: Int, maxAngle: Int, offsetTenths: Int, extendSpeed: Int, retractSpeed: Int) -> Unit,
+    onSaveName: (String) -> Unit,
 ) {
     var minAngle by remember(settings) { mutableStateOf(settings?.minAngleDeg?.toString() ?: "") }
     var maxAngle by remember(settings) { mutableStateOf(settings?.maxAngleDeg?.toString() ?: "") }
@@ -384,6 +388,7 @@ private fun DeviceSettingsSection(
     }
     var extendSpeed by remember(settings) { mutableStateOf(settings?.maxExtendSpeed?.toString() ?: "0") }
     var retractSpeed by remember(settings) { mutableStateOf(settings?.maxRetractSpeed?.toString() ?: "0") }
+    var nameField by remember(deviceName) { mutableStateOf(deviceName ?: "") }
 
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Text("Device Settings", style = MaterialTheme.typography.titleMedium)
@@ -394,6 +399,12 @@ private fun DeviceSettingsSection(
                 Text("Read from device")
             }
         } else {
+            OutlinedTextField(
+                value = nameField,
+                onValueChange = { if (it.length <= 20) nameField = it },
+                label = { Text("Device name") },
+                modifier = Modifier.fillMaxWidth(),
+            )
             OutlinedTextField(
                 value = minAngle,
                 onValueChange = { minAngle = it },
@@ -434,6 +445,9 @@ private fun DeviceSettingsSection(
                         val ext = extendSpeed.toIntOrNull() ?: return@Button
                         val ret = retractSpeed.toIntOrNull() ?: return@Button
                         onSave(min, max, (ofs * 10f).toInt(), ext, ret)
+                        if (nameField.isNotBlank() && nameField != deviceName) {
+                            onSaveName(nameField)
+                        }
                     },
                 ) {
                     Text("Save to device")

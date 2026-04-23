@@ -362,6 +362,17 @@ static void setup() {
         }
     );
     wallter::ble_ota::set_version_string(VERSION_STRING);
+
+    // Load custom BLE device name from NVS (defaults to "wallter").
+    static char ble_name[32];
+    wallter::calibration::load_device_name(ble_name, sizeof(ble_name));
+    wallter::ble_ota::set_device_name(ble_name);
+    wallter::ble_ota::set_device_name_callbacks(
+        [](const char *name) -> bool {
+            return wallter::calibration::save_device_name(name) == ESP_OK;
+        }
+    );
+
     wallter::ble_ota::init();
 }
 

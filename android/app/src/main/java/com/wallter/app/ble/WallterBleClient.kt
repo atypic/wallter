@@ -64,6 +64,7 @@ class WallterBleClient(private val context: Context) {
     private var angle: BluetoothGattCharacteristic? = null
     private var settings: BluetoothGattCharacteristic? = null
     private var version: BluetoothGattCharacteristic? = null
+    private var deviceNameChr: BluetoothGattCharacteristic? = null
 
     private val opMutex = Mutex()
 
@@ -209,6 +210,7 @@ class WallterBleClient(private val context: Context) {
         angle = null
         settings = null
         version = null
+        deviceNameChr = null
 
         serviceDiscoveryRetried = false
         lastGattTable = null
@@ -272,6 +274,17 @@ class WallterBleClient(private val context: Context) {
         val chr = version ?: return null
         val bytes = readCharacteristic(chr)
         return if (bytes.isNotEmpty()) String(bytes, Charsets.UTF_8) else null
+    }
+
+    suspend fun readDeviceName(): String? {
+        val chr = deviceNameChr ?: return null
+        val bytes = readCharacteristic(chr)
+        return if (bytes.isNotEmpty()) String(bytes, Charsets.UTF_8) else null
+    }
+
+    suspend fun writeDeviceName(name: String) {
+        val chr = deviceNameChr ?: throw IOException("Device name characteristic not found")
+        writeCharacteristic(chr, name.toByteArray(Charsets.UTF_8))
     }
 
     suspend fun otaBegin(imageSize: Int, sha256: ByteArray?) {
@@ -498,6 +511,7 @@ class WallterBleClient(private val context: Context) {
             angle = findCharacteristicAny(gatt, WallterUuids.ANGLE)
             settings = findCharacteristicAny(gatt, WallterUuids.SETTINGS)
             version = findCharacteristicAny(gatt, WallterUuids.VERSION)
+            deviceNameChr = findCharacteristicAny(gatt, WallterUuids.DEVICE_NAME)
 
             if (buttons == null || version == null || settings == null) {
                 Log.e(TAG, "Expected characteristics missing (buttons=${buttons != null} version=${version != null} settings=${settings != null})")

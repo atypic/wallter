@@ -42,4 +42,13 @@ void set_settings_callbacks(SettingsReadCb read_cb, SettingsWriteCb write_cb);
 // Set the firmware version string to expose over BLE.
 void set_version_string(const char *version);
 
+// Set the BLE device name (call before init()).
+void set_device_name(const char *name);
+
+// Callback for persisting device name changes received over BLE.
+typedef bool (*DeviceNameWriteCb)(const char *name);
+
+// Register callback so the BLE device-name characteristic can persist changes.
+void set_device_name_callbacks(DeviceNameWriteCb write_cb);
+
 } // namespace wallter::ble_ota

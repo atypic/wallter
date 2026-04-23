@@ -401,4 +401,41 @@ esp_err_t erase_calibration() {
     return ESP_OK;
 }
 
+static constexpr const char *kNvsKeyName = "device_name";
+
+bool load_device_name(char *out, int max_len) {
+    if (!out || max_len <= 0) return false;
+    strncpy(out, "wallter", (size_t)max_len);
+    out[max_len - 1] = '\0';
+
+    nvs_handle_t handle;
+    esp_err_t err = nvs_open(kNvsNamespace, NVS_READONLY, &handle);
+    if (err != ESP_OK) return false;
+
+    size_t len = (size_t)max_len;
+    err = nvs_get_str(handle, kNvsKeyName, out, &len);
+    nvs_close(handle);
+    if (err != ESP_OK) return false;
+
+    ESP_LOGI(TAG, "Device name loaded: %s", out);
+    return true;
+}
+
+esp_err_t save_device_name(const char *name) {
+    if (!name || name[0] == '\0') return ESP_ERR_INVALID_ARG;
+
+    nvs_handle_t handle;
+    esp_err_t err = nvs_open(kNvsNamespace, NVS_READWRITE, &handle);
+    if (err != ESP_OK) return err;
+
+    err = nvs_set_str(handle, kNvsKeyName, name);
+    if (err == ESP_OK) err = nvs_commit(handle);
+    nvs_close(handle);
+
+    if (err == ESP_OK) {
+        ESP_LOGI(TAG, "Device name saved: %s", name);
+    }
+    return err;
+}
+
 } // namespace wallter::calibration

@@ -43,6 +43,7 @@ data class UiState(
     val lastError: String? = null,
     val deviceSettings: WallterBleClient.DeviceSettings? = null,
     val deviceFirmwareVersion: String? = null,
+    val deviceName: String? = null,
 )
 
 data class FirmwareAsset(
@@ -79,6 +80,7 @@ class MainViewModel : ViewModel() {
     private val isLoadingFirmwares = MutableStateFlow(false)
     private val deviceSettings = MutableStateFlow<WallterBleClient.DeviceSettings?>(null)
     private val deviceFirmwareVersion = MutableStateFlow<String?>(null)
+    private val deviceName = MutableStateFlow<String?>(null)
 
     val uiState: StateFlow<UiState> = combine(
         permissionsGranted,
@@ -107,6 +109,7 @@ class MainViewModel : ViewModel() {
         .combine(isLoadingFirmwares) { s, loading -> s.copy(isLoadingFirmwares = loading) }
         .combine(deviceSettings) { s, ds -> s.copy(deviceSettings = ds) }
         .combine(deviceFirmwareVersion) { s, v -> s.copy(deviceFirmwareVersion = v) }
+        .combine(deviceName) { s, n -> s.copy(deviceName = n) }
         .stateIn(viewModelScope, kotlinx.coroutines.flow.SharingStarted.Eagerly, UiState())
 
     fun onPermissionsResult(grants: Map<String, Boolean>) {
@@ -358,6 +361,7 @@ class MainViewModel : ViewModel() {
                 lastError.value = null
                 val s = c.readSettings()
                 deviceSettings.value = s
+                deviceName.value = c.readDeviceName()
             } catch (t: Throwable) {
                 lastError.value = t.message ?: t.toString()
             }
@@ -379,6 +383,19 @@ class MainViewModel : ViewModel() {
                 )
                 c.writeSettings(s)
                 deviceSettings.value = s
+            } catch (t: Throwable) {
+                lastError.value = t.message ?: t.toString()
+            }
+        }
+    }
+
+    fun saveDeviceName(name: String) {
+        val c = client ?: return
+        viewModelScope.launch {
+            try {
+                lastError.value = null
+                c.writeDeviceName(name)
+                deviceName.value = name
             } catch (t: Throwable) {
                 lastError.value = t.message ?: t.toString()
             }
@@ -530,6 +547,7 @@ class MainViewModel : ViewModel() {
                         lastAngleUpdateMs = 0L
                         deviceFirmwareVersion.value = null
                         deviceSettings.value = null
+                        deviceName.value = null
                         return@collect
                     }
 
@@ -546,6 +564,11 @@ class MainViewModel : ViewModel() {
                         deviceSettings.value = c.readSettings()
                     } catch (t: Throwable) {
                         android.util.Log.w("MainViewModel", "readSettings failed", t)
+                    }
+                    try {
+                        deviceName.value = c.readDeviceName()
+                    } catch (t: Throwable) {
+                        android.util.Log.w("MainViewModel", "readDeviceName failed", t)
                     }
 
                     // Seed test angle from the first read if possible.
