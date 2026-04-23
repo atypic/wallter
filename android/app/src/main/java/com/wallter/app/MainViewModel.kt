@@ -374,7 +374,13 @@ class MainViewModel : ViewModel() {
 
     fun saveDeviceSettings(minAngle: Int, maxAngle: Int, offsetTenths: Int,
                            maxExtendSpeed: Int, maxRetractSpeed: Int) {
-        val c = client ?: return
+        val c = client
+        if (c == null) {
+            android.util.Log.e("MainViewModel", "saveDeviceSettings: client is null!")
+            settingsSaveResult.value = "Error: not connected"
+            return
+        }
+        android.util.Log.i("MainViewModel", "saveDeviceSettings: min=$minAngle max=$maxAngle ofs=$offsetTenths ext=$maxExtendSpeed ret=$maxRetractSpeed")
         viewModelScope.launch {
             try {
                 lastError.value = null
@@ -386,11 +392,13 @@ class MainViewModel : ViewModel() {
                     maxRetractSpeed = maxRetractSpeed,
                 )
                 c.writeSettings(s)
+                android.util.Log.i("MainViewModel", "writeSettings succeeded")
                 deviceSettings.value = s
                 settingsSaveResult.value = "Settings saved"
             } catch (t: Throwable) {
+                android.util.Log.e("MainViewModel", "writeSettings failed", t)
                 lastError.value = t.message ?: t.toString()
-                settingsSaveResult.value = "Save failed"
+                settingsSaveResult.value = "Save failed: ${t.message}"
             }
         }
     }

@@ -409,7 +409,12 @@ static int gatt_access_settings(uint16_t /*conn_handle*/, uint16_t /*attr_handle
         s.angle_offset_tenths = (int8_t)buf[2];
         s.max_extend_speed = (copied >= 5) ? buf[3] : 0;
         s.max_retract_speed = (copied >= 5) ? buf[4] : 0;
+        ESP_LOGI(TAG, "settings write: min=%u max=%u ofs=%d ext=%u ret=%u (len=%u)",
+                 (unsigned)s.min_angle_deg, (unsigned)s.max_angle_deg,
+                 (int)s.angle_offset_tenths, (unsigned)s.max_extend_speed,
+                 (unsigned)s.max_retract_speed, (unsigned)copied);
         bool ok = g_settings_write_cb(s);
+        ESP_LOGI(TAG, "settings write %s", ok ? "OK" : "FAILED");
         return ok ? 0 : BLE_ATT_ERR_UNLIKELY;
     }
     return BLE_ATT_ERR_UNLIKELY;
