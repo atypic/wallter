@@ -526,13 +526,24 @@ class MainViewModel : ViewModel() {
                         currentAngleDeg.value = null
                         lastAngleUpdateMs = 0L
                         deviceFirmwareVersion.value = null
+                        deviceSettings.value = null
                         return@collect
                     }
 
-                    // Read firmware version once on connect.
+                    // Small delay to let GATT settle after service discovery.
+                    delay(300)
+
+                    // Read firmware version and device settings once on connect.
                     try {
                         deviceFirmwareVersion.value = c.readVersion()
-                    } catch (_: Throwable) {}
+                    } catch (t: Throwable) {
+                        android.util.Log.w("MainViewModel", "readVersion failed", t)
+                    }
+                    try {
+                        deviceSettings.value = c.readSettings()
+                    } catch (t: Throwable) {
+                        android.util.Log.w("MainViewModel", "readSettings failed", t)
+                    }
 
                     // Seed test angle from the first read if possible.
                     while (c.isConnected.value) {

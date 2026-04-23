@@ -130,9 +130,11 @@ static void rebuild_target_table() {
 
 
 extern "C" void app_main(void) {
-    ESP_LOGI(TAG, "Init");
-
-    ESP_LOGI(TAG, "Firmware: %s", VERSION_STRING);
+    ESP_LOGI(TAG, "");
+    ESP_LOGI(TAG, "========================================");
+    ESP_LOGI(TAG, "   WALLTER  %s", VERSION_STRING);
+    ESP_LOGI(TAG, "========================================");
+    ESP_LOGI(TAG, "");
 
     // NVS for calibration persistence
     wallter::calibration::init_nvs();

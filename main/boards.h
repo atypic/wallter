@@ -13,6 +13,9 @@
 #define BOARD_TYPE_ARCTIC_CYTRON 3
 #define BOARD_TYPE_SLUPPEN_PROTO 4
 
+// Unified firmware version — update on each release.
+#define FW_VERSION "2.0.1"
+
 // Select board via unified BOARD_TYPE macro (see boards.h for constants)
 // #define BOARD_TYPE BOARD_TYPE_LEANGEN_4_MOTOR
 // #define BOARD_TYPE BOARD_TYPE_ARCTIC_WITH_KEYPAD
@@ -41,7 +44,8 @@ bool g_has_keypad = false;
 #define HINGE_TO_ACT_MOUNT_REAR 0.45
 #define HINGE_TO_ACT_MOUNT_FRONT 4.2
 
-#define VERSION_STRING "FW: GRIP_R_CYTRON"
+#define VERSION_STRING "v" FW_VERSION " GRIP_R_CYTRON"
+#define BOARD_VARIANT "GRIP_R_CYTRON"
 
 unsigned int HAL_CNT[NUM_MOTORS] = {22, 24, 26, 28};
 unsigned int HAL_CLK[NUM_MOTORS] = {23, 25, 27, 29};
@@ -88,7 +92,8 @@ CytronMD motors[NUM_MOTORS] = {CytronMD(PWM_DIR, 3, 36),  // MASTER
 #define HINGE_TO_ACT_MOUNT_REAR 0.45
 #define HINGE_TO_ACT_MOUNT_FRONT 4.2
 
-#define VERSION_STRING "FW: ARCTIC_3_KP"
+#define VERSION_STRING "v" FW_VERSION " ARCTIC_3_KP"
+#define BOARD_VARIANT "ARCTIC_3_KP"
 
 bool g_has_keypad = true;
 
@@ -145,7 +150,8 @@ static const bool g_has_keypad = false;
 #define HINGE_TO_ACT_MOUNT_REAR 0.45
 #define HINGE_TO_ACT_MOUNT_FRONT 4.2
 
-#define VERSION_STRING "FW: 07-2025"
+#define VERSION_STRING "v" FW_VERSION " ARCTIC_CYTRON"
+#define BOARD_VARIANT "ARCTIC_CYTRON"
 
 // LCD I2C configuration (single source of truth)
 #define LCD_SDA_PIN 7
@@ -217,7 +223,8 @@ bool g_has_keypad = false;
 #define HINGE_TO_ACT_MOUNT_REAR 0.45
 #define HINGE_TO_ACT_MOUNT_FRONT 4.2
 
-#define VERSION_STRING "SLUPPEN_001"
+#define VERSION_STRING "v" FW_VERSION " SLUPPEN_001"
+#define BOARD_VARIANT "SLUPPEN_001"
 
 unsigned int HAL_CNT[NUM_MOTORS] = {28, 26, 24, 22};
 unsigned int HAL_CLK[NUM_MOTORS] = {29, 27, 25, 23};

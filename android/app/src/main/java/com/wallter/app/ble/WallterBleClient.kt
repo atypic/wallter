@@ -207,6 +207,8 @@ class WallterBleClient(private val context: Context) {
         otaStatus = null
         buttons = null
         angle = null
+        settings = null
+        version = null
 
         serviceDiscoveryRetried = false
         lastGattTable = null
@@ -383,14 +385,20 @@ class WallterBleClient(private val context: Context) {
             chr.writeType = BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE
             chr.value = value
 
-            @SuppressLint("MissingPermission")
-            val ok = g.writeCharacteristic(chr)
-            if (!ok) {
-                throw IOException("writeCharacteristic (no-response) returned false")
+            // Retry with backoff if the BLE controller's buffer is full.
+            var retries = 0
+            val maxRetries = 20
+            while (true) {
+                @SuppressLint("MissingPermission")
+                val ok = g.writeCharacteristic(chr)
+                if (ok) break
+                if (++retries > maxRetries) {
+                    throw IOException("writeCharacteristic (no-response) failed after $maxRetries retries")
+                }
+                delay(5L * retries) // increasing backoff: 5, 10, 15, …
             }
-            // No callback to wait for; write-without-response is fire-and-forget.
-            // Small delay to avoid overwhelming the BLE controller queue.
-            delay(2)
+            // Pace writes to avoid flooding the controller queue.
+            delay(4)
         }
     }
 
@@ -485,8 +493,8 @@ class WallterBleClient(private val context: Context) {
             settings = findCharacteristicAny(gatt, WallterUuids.SETTINGS)
             version = findCharacteristicAny(gatt, WallterUuids.VERSION)
 
-            if (buttons == null) {
-                Log.e(TAG, "Buttons characteristic not found after service discovery")
+            if (buttons == null || version == null || settings == null) {
+                Log.e(TAG, "Expected characteristics missing (buttons=${buttons != null} version=${version != null} settings=${settings != null})")
                 if (!serviceDiscoveryRetried) {
                     serviceDiscoveryRetried = true
                     val refreshed = refreshDeviceCache(gatt)

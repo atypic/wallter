@@ -15,6 +15,8 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -96,7 +98,8 @@ fun WallterApp(viewModel: MainViewModel) {
             modifier = Modifier
                 .fillMaxSize()
                 .padding(padding)
-                .padding(16.dp),
+                .padding(16.dp)
+                .verticalScroll(rememberScrollState()),
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
             Text("Wallter", style = MaterialTheme.typography.headlineSmall)
@@ -143,14 +146,15 @@ fun WallterApp(viewModel: MainViewModel) {
                     onReboot = { viewModel.reboot() },
                 )
 
-                Spacer(modifier = Modifier.height(8.dp))
+                if (ui.isConnected) {
+                    Spacer(modifier = Modifier.height(8.dp))
 
-                DeviceSettingsSection(
-                    enabled = ui.isConnected,
-                    settings = ui.deviceSettings,
-                    onRefresh = { viewModel.refreshDeviceSettings() },
-                    onSave = { min, max, offset -> viewModel.saveDeviceSettings(min, max, offset) },
-                )
+                    DeviceSettingsSection(
+                        settings = ui.deviceSettings,
+                        onRefresh = { viewModel.refreshDeviceSettings() },
+                        onSave = { min, max, offset -> viewModel.saveDeviceSettings(min, max, offset) },
+                    )
+                }
             }
 
             if (!ui.permissionsGranted) {
@@ -357,23 +361,25 @@ private fun MaintenanceSection(
 
 @Composable
 private fun DeviceSettingsSection(
-    enabled: Boolean,
     settings: com.wallter.app.ble.WallterBleClient.DeviceSettings?,
     onRefresh: () -> Unit,
     onSave: (minAngle: Int, maxAngle: Int, offsetTenths: Int) -> Unit,
 ) {
     var minAngle by remember(settings) { mutableStateOf(settings?.minAngleDeg?.toString() ?: "") }
     var maxAngle by remember(settings) { mutableStateOf(settings?.maxAngleDeg?.toString() ?: "") }
-    var offsetTenths by remember(settings) { mutableStateOf(settings?.angleOffsetTenths?.toString() ?: "") }
+    var offsetDeg by remember(settings) {
+        mutableStateOf(settings?.angleOffsetTenths?.let { "%.1f".format(it / 10f) } ?: "")
+    }
 
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Text("Device Settings", style = MaterialTheme.typography.titleMedium)
 
-        OutlinedButton(onClick = onRefresh, enabled = enabled) {
-            Text("Read from device")
-        }
-
-        if (settings != null) {
+        if (settings == null) {
+            Text("Loading…", style = MaterialTheme.typography.bodySmall)
+            OutlinedButton(onClick = onRefresh) {
+                Text("Read from device")
+            }
+        } else {
             OutlinedTextField(
                 value = minAngle,
                 onValueChange = { minAngle = it },
@@ -387,22 +393,26 @@ private fun DeviceSettingsSection(
                 modifier = Modifier.fillMaxWidth(),
             )
             OutlinedTextField(
-                value = offsetTenths,
-                onValueChange = { offsetTenths = it },
-                label = { Text("Angle offset (0.1° steps)") },
+                value = offsetDeg,
+                onValueChange = { offsetDeg = it },
+                label = { Text("Angle offset (°)") },
                 modifier = Modifier.fillMaxWidth(),
             )
 
-            Button(
-                onClick = {
-                    val min = minAngle.toIntOrNull() ?: return@Button
-                    val max = maxAngle.toIntOrNull() ?: return@Button
-                    val ofs = offsetTenths.toIntOrNull() ?: return@Button
-                    onSave(min, max, ofs)
-                },
-                enabled = enabled,
-            ) {
-                Text("Save to device")
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Button(
+                    onClick = {
+                        val min = minAngle.toIntOrNull() ?: return@Button
+                        val max = maxAngle.toIntOrNull() ?: return@Button
+                        val ofs = offsetDeg.toFloatOrNull() ?: return@Button
+                        onSave(min, max, (ofs * 10f).toInt())
+                    },
+                ) {
+                    Text("Save to device")
+                }
+                OutlinedButton(onClick = onRefresh) {
+                    Text("Refresh")
+                }
             }
         }
     }
