@@ -426,13 +426,13 @@ private fun DeviceSettingsSection(
             OutlinedTextField(
                 value = extendSpeed,
                 onValueChange = { extendSpeed = it },
-                label = { Text("Max extend speed (0 = default)") },
+                label = { Text("Max extend speed") },
                 modifier = Modifier.fillMaxWidth(),
             )
             OutlinedTextField(
                 value = retractSpeed,
                 onValueChange = { retractSpeed = it },
-                label = { Text("Max retract speed (0 = default)") },
+                label = { Text("Max retract speed") },
                 modifier = Modifier.fillMaxWidth(),
             )
 

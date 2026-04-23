@@ -346,8 +346,8 @@ static void setup() {
                 .min_angle_deg = g_cal_meta.min_angle_deg,
                 .max_angle_deg = g_cal_meta.max_angle_deg,
                 .angle_offset_tenths = g_cal_meta.angle_offset_tenths,
-                .max_extend_speed = g_cal_meta.max_extend_speed,
-                .max_retract_speed = g_cal_meta.max_retract_speed,
+                .max_extend_speed = g_cal_meta.max_extend_speed ? g_cal_meta.max_extend_speed : (uint8_t)MASTER_MAX,
+                .max_retract_speed = g_cal_meta.max_retract_speed ? g_cal_meta.max_retract_speed : (uint8_t)MASTER_MAX,
             };
         },
         [](const wallter::ble_ota::Settings &s) -> bool {
