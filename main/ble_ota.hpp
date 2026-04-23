@@ -28,6 +28,8 @@ struct Settings {
     uint8_t min_angle_deg;
     uint8_t max_angle_deg;
     int8_t  angle_offset_tenths;
+    uint8_t max_extend_speed;
+    uint8_t max_retract_speed;
 };
 
 // Callbacks for reading/writing calibration settings over BLE.

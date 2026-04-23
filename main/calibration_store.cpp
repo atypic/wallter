@@ -80,7 +80,9 @@ struct CalMetaBlobV1 {
     uint8_t min_angle_deg;
     uint8_t max_angle_deg;
     int8_t  angle_offset_tenths;  // 0.1° steps
-    uint8_t reserved[1];
+    uint8_t max_extend_speed;     // 0 = compile-time default
+    uint8_t max_retract_speed;    // 0 = compile-time default
+    uint8_t reserved[3];
 };
 
 static bool is_valid_angle_setting(int angle_deg) {
@@ -287,6 +289,8 @@ bool load_meta_or_default(CalMeta &out) {
     out.min_angle_deg = (uint8_t)DEFAULT_CAL_MIN_ANGLE;
     out.max_angle_deg = (uint8_t)DEFAULT_CAL_MAX_ANGLE;
     out.angle_offset_tenths = (int8_t)DEFAULT_ACCEL_ANGLE_OFFSET_TENTHS;
+    out.max_extend_speed = 0;   // 0 = use MASTER_MAX
+    out.max_retract_speed = 0;
 
     nvs_handle_t handle;
     esp_err_t err = nvs_open(kNvsNamespace, NVS_READONLY, &handle);
@@ -320,8 +324,11 @@ bool load_meta_or_default(CalMeta &out) {
     out.angle_offset_tenths = (blob.angle_offset_tenths != 0)
                                   ? blob.angle_offset_tenths
                                   : (int8_t)DEFAULT_ACCEL_ANGLE_OFFSET_TENTHS;
-    ESP_LOGI(TAG, "Calibration meta loaded: min=%u max=%u offset=%d tenths",
-             (unsigned)out.min_angle_deg, (unsigned)out.max_angle_deg, (int)out.angle_offset_tenths);
+    out.max_extend_speed = blob.max_extend_speed;    // 0 = compile-time default
+    out.max_retract_speed = blob.max_retract_speed;
+    ESP_LOGI(TAG, "Calibration meta loaded: min=%u max=%u offset=%d tenths ext_spd=%u ret_spd=%u",
+             (unsigned)out.min_angle_deg, (unsigned)out.max_angle_deg, (int)out.angle_offset_tenths,
+             (unsigned)out.max_extend_speed, (unsigned)out.max_retract_speed);
     return true;
 }
 
@@ -338,6 +345,8 @@ esp_err_t save_meta(const CalMeta &meta) {
     blob.min_angle_deg = meta.min_angle_deg;
     blob.max_angle_deg = meta.max_angle_deg;
     blob.angle_offset_tenths = meta.angle_offset_tenths;
+    blob.max_extend_speed = meta.max_extend_speed;
+    blob.max_retract_speed = meta.max_retract_speed;
 
     nvs_handle_t handle;
     esp_err_t err = nvs_open(kNvsNamespace, NVS_READWRITE, &handle);
@@ -355,8 +364,10 @@ esp_err_t save_meta(const CalMeta &meta) {
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "NVS meta save failed: %d", (int)err);
     } else {
-        ESP_LOGI(TAG, "Calibration meta saved: min=%u max=%u offset=%d tenths",
-                 (unsigned)meta.min_angle_deg, (unsigned)meta.max_angle_deg, (int)meta.angle_offset_tenths);
+        ESP_LOGI(TAG, "Calibration meta saved: min=%u max=%u offset=%d ext_spd=%u ret_spd=%u",
+                 (unsigned)meta.min_angle_deg, (unsigned)meta.max_angle_deg,
+                 (int)meta.angle_offset_tenths,
+                 (unsigned)meta.max_extend_speed, (unsigned)meta.max_retract_speed);
     }
     return err;
 }

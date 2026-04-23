@@ -1,3 +1,4 @@
+@file:OptIn(ExperimentalMaterial3Api::class)
 package com.wallter.app.ui
 
 import android.Manifest
@@ -20,12 +21,14 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
+import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -94,14 +97,20 @@ fun WallterApp(viewModel: MainViewModel) {
     // Local file picking is intentionally removed in favor of listing public GitHub releases.
 
     Scaffold { padding ->
-        Column(
+        PullToRefreshBox(
+            isRefreshing = ui.isLoadingFirmwares,
+            onRefresh = { viewModel.refreshAvailableFirmwares() },
             modifier = Modifier
                 .fillMaxSize()
-                .padding(padding)
-                .padding(16.dp)
-                .verticalScroll(rememberScrollState()),
-            verticalArrangement = Arrangement.spacedBy(12.dp)
+                .padding(padding),
         ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(16.dp)
+                    .verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
             Text("Wallter", style = MaterialTheme.typography.headlineSmall)
 
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -152,7 +161,9 @@ fun WallterApp(viewModel: MainViewModel) {
                     DeviceSettingsSection(
                         settings = ui.deviceSettings,
                         onRefresh = { viewModel.refreshDeviceSettings() },
-                        onSave = { min, max, offset -> viewModel.saveDeviceSettings(min, max, offset) },
+                        onSave = { min, max, offset, extSpd, retSpd ->
+                        viewModel.saveDeviceSettings(min, max, offset, extSpd, retSpd)
+                    },
                     )
                 }
             }
@@ -167,6 +178,7 @@ fun WallterApp(viewModel: MainViewModel) {
             if (ui.lastError != null) {
                 Text(ui.lastError!!, color = MaterialTheme.colorScheme.error)
             }
+        }
         }
     }
 }
@@ -363,13 +375,15 @@ private fun MaintenanceSection(
 private fun DeviceSettingsSection(
     settings: com.wallter.app.ble.WallterBleClient.DeviceSettings?,
     onRefresh: () -> Unit,
-    onSave: (minAngle: Int, maxAngle: Int, offsetTenths: Int) -> Unit,
+    onSave: (minAngle: Int, maxAngle: Int, offsetTenths: Int, extendSpeed: Int, retractSpeed: Int) -> Unit,
 ) {
     var minAngle by remember(settings) { mutableStateOf(settings?.minAngleDeg?.toString() ?: "") }
     var maxAngle by remember(settings) { mutableStateOf(settings?.maxAngleDeg?.toString() ?: "") }
     var offsetDeg by remember(settings) {
         mutableStateOf(settings?.angleOffsetTenths?.let { "%.1f".format(it / 10f) } ?: "")
     }
+    var extendSpeed by remember(settings) { mutableStateOf(settings?.maxExtendSpeed?.toString() ?: "0") }
+    var retractSpeed by remember(settings) { mutableStateOf(settings?.maxRetractSpeed?.toString() ?: "0") }
 
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Text("Device Settings", style = MaterialTheme.typography.titleMedium)
@@ -398,6 +412,18 @@ private fun DeviceSettingsSection(
                 label = { Text("Angle offset (°)") },
                 modifier = Modifier.fillMaxWidth(),
             )
+            OutlinedTextField(
+                value = extendSpeed,
+                onValueChange = { extendSpeed = it },
+                label = { Text("Max extend speed (0 = default)") },
+                modifier = Modifier.fillMaxWidth(),
+            )
+            OutlinedTextField(
+                value = retractSpeed,
+                onValueChange = { retractSpeed = it },
+                label = { Text("Max retract speed (0 = default)") },
+                modifier = Modifier.fillMaxWidth(),
+            )
 
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Button(
@@ -405,7 +431,9 @@ private fun DeviceSettingsSection(
                         val min = minAngle.toIntOrNull() ?: return@Button
                         val max = maxAngle.toIntOrNull() ?: return@Button
                         val ofs = offsetDeg.toFloatOrNull() ?: return@Button
-                        onSave(min, max, (ofs * 10f).toInt())
+                        val ext = extendSpeed.toIntOrNull() ?: return@Button
+                        val ret = retractSpeed.toIntOrNull() ?: return@Button
+                        onSave(min, max, (ofs * 10f).toInt(), ext, ret)
                     },
                 ) {
                     Text("Save to device")

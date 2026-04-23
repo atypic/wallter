@@ -371,12 +371,13 @@ static int gatt_access_settings(uint16_t /*conn_handle*/, uint16_t /*attr_handle
     if (ctxt->op == BLE_GATT_ACCESS_OP_READ_CHR) {
         if (!g_settings_read_cb) return BLE_ATT_ERR_UNLIKELY;
         Settings s = g_settings_read_cb();
-        uint8_t buf[3] = {s.min_angle_deg, s.max_angle_deg, (uint8_t)s.angle_offset_tenths};
+        uint8_t buf[5] = {s.min_angle_deg, s.max_angle_deg, (uint8_t)s.angle_offset_tenths,
+                          s.max_extend_speed, s.max_retract_speed};
         int rc = os_mbuf_append(ctxt->om, buf, sizeof(buf));
         return (rc == 0) ? 0 : BLE_ATT_ERR_INSUFFICIENT_RES;
     }
     if (ctxt->op == BLE_GATT_ACCESS_OP_WRITE_CHR) {
-        uint8_t buf[3] = {0};
+        uint8_t buf[5] = {0};
         uint16_t copied = 0;
         int rc = ble_hs_mbuf_to_flat(ctxt->om, buf, sizeof(buf), &copied);
         if (rc != 0 || copied < 3) return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
@@ -385,6 +386,8 @@ static int gatt_access_settings(uint16_t /*conn_handle*/, uint16_t /*attr_handle
         s.min_angle_deg = buf[0];
         s.max_angle_deg = buf[1];
         s.angle_offset_tenths = (int8_t)buf[2];
+        s.max_extend_speed = (copied >= 5) ? buf[3] : 0;
+        s.max_retract_speed = (copied >= 5) ? buf[4] : 0;
         bool ok = g_settings_write_cb(s);
         return ok ? 0 : BLE_ATT_ERR_UNLIKELY;
     }

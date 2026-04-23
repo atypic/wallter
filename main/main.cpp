@@ -307,6 +307,8 @@ static void setup() {
     ctx.target_idx = &g_target_idx;
     ctx.min_target_idx = g_min_target_idx;
     ctx.max_target_idx = g_max_target_idx;
+    ctx.max_extend_speed = g_cal_meta.max_extend_speed;
+    ctx.max_retract_speed = g_cal_meta.max_retract_speed;
     wallter::control::init(ctx);
 
     // Reset counters and positions like Arduino setup().
@@ -344,13 +346,18 @@ static void setup() {
                 .min_angle_deg = g_cal_meta.min_angle_deg,
                 .max_angle_deg = g_cal_meta.max_angle_deg,
                 .angle_offset_tenths = g_cal_meta.angle_offset_tenths,
+                .max_extend_speed = g_cal_meta.max_extend_speed,
+                .max_retract_speed = g_cal_meta.max_retract_speed,
             };
         },
         [](const wallter::ble_ota::Settings &s) -> bool {
             g_cal_meta.min_angle_deg = s.min_angle_deg;
             g_cal_meta.max_angle_deg = s.max_angle_deg;
             g_cal_meta.angle_offset_tenths = s.angle_offset_tenths;
+            g_cal_meta.max_extend_speed = s.max_extend_speed;
+            g_cal_meta.max_retract_speed = s.max_retract_speed;
             wallter::accel::set_angle_offset((float)s.angle_offset_tenths * 0.1f);
+            wallter::control::update_speeds(s.max_extend_speed, s.max_retract_speed);
             return wallter::calibration::save_meta(g_cal_meta) == ESP_OK;
         }
     );

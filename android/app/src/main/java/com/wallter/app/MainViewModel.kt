@@ -364,7 +364,8 @@ class MainViewModel : ViewModel() {
         }
     }
 
-    fun saveDeviceSettings(minAngle: Int, maxAngle: Int, offsetTenths: Int) {
+    fun saveDeviceSettings(minAngle: Int, maxAngle: Int, offsetTenths: Int,
+                           maxExtendSpeed: Int, maxRetractSpeed: Int) {
         val c = client ?: return
         viewModelScope.launch {
             try {
@@ -373,6 +374,8 @@ class MainViewModel : ViewModel() {
                     minAngleDeg = minAngle,
                     maxAngleDeg = maxAngle,
                     angleOffsetTenths = offsetTenths,
+                    maxExtendSpeed = maxExtendSpeed,
+                    maxRetractSpeed = maxRetractSpeed,
                 )
                 c.writeSettings(s)
                 deviceSettings.value = s

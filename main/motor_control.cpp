@@ -260,6 +260,14 @@ void set_command(int cmd) {
 static int32_t get_master_motor_speed() {
     float target_deg = g_ctx.target_angles[*g_ctx.target_idx];
 
+    // Choose max speed based on current direction.
+    uint32_t max_speed = (uint32_t)MASTER_MAX;
+    if (g_current_cmd == wallter::CMD_EXTEND) {
+        if (g_ctx.max_extend_speed > 0) max_speed = g_ctx.max_extend_speed;
+    } else if (g_current_cmd == wallter::CMD_RETRACT || g_current_cmd == wallter::CMD_HOME) {
+        if (g_ctx.max_retract_speed > 0) max_speed = g_ctx.max_retract_speed;
+    }
+
     uint32_t return_speed = (uint32_t)abs(g_ctx.motors[g_ctx.master_motor_index].getSpeed());
     if ((return_speed < (uint32_t)MINSPEED) && (g_current_cmd != wallter::CMD_STOP)) {
         g_accel_phase = true;
@@ -272,8 +280,8 @@ static int32_t get_master_motor_speed() {
                 return_speed = MINSPEED;
             }
             return_speed += ACCEL_STEP;
-            if (return_speed >= (uint32_t)MASTER_MAX) {
-                return_speed = MASTER_MAX;
+            if (return_speed >= max_speed) {
+                return_speed = max_speed;
                 g_accel_phase = false;
                 g_delta_acc_ms = 0;
             }
@@ -658,6 +666,11 @@ void update_limits(int min_target_idx, int max_target_idx) {
 
     if ((int)*g_ctx.target_idx < g_ctx.min_target_idx) *g_ctx.target_idx = (uint32_t)g_ctx.min_target_idx;
     if ((int)*g_ctx.target_idx > g_ctx.max_target_idx) *g_ctx.target_idx = (uint32_t)g_ctx.max_target_idx;
+}
+
+void update_speeds(uint8_t extend_speed, uint8_t retract_speed) {
+    g_ctx.max_extend_speed = extend_speed;
+    g_ctx.max_retract_speed = retract_speed;
 }
 
 } // namespace wallter::control

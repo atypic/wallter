@@ -21,6 +21,10 @@ struct Context {
     // Usable target index range (inclusive). These are logical indexes into target_ticks.
     int min_target_idx{0};
     int max_target_idx{0};
+
+    // Per-direction max speed (0 = use compile-time MASTER_MAX).
+    uint8_t max_extend_speed{0};
+    uint8_t max_retract_speed{0};
 };
 
 void init(const Context &ctx);
@@ -42,6 +46,9 @@ void handle_buttons(bool extend_event, bool retract_event);
 
 // Updates usable angle limits at runtime.
 void update_limits(int min_target_idx, int max_target_idx);
+
+// Updates per-direction max speeds at runtime (0 = compile-time default).
+void update_speeds(uint8_t extend_speed, uint8_t retract_speed);
 
 // Helpers used by the UI loop
 uint8_t compute_progress_percent(int32_t current_pos, int32_t start_pos, int32_t target_pos);
