@@ -249,6 +249,16 @@ private fun ControlSection(
                 Text("Lower angle")
             }
         }
+
+        Spacer(modifier = Modifier.height(24.dp))
+        Column(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalAlignment = Alignment.CenterHorizontally,
+        ) {
+            Text("brush", style = MaterialTheme.typography.displayMedium, fontWeight = FontWeight.Bold)
+            Text("the", style = MaterialTheme.typography.displayMedium, fontWeight = FontWeight.Bold)
+            Text("board", style = MaterialTheme.typography.displayMedium, fontWeight = FontWeight.Bold)
+        }
     }
 }
 
