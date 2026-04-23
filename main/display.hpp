@@ -38,6 +38,7 @@ class Display {
     void update_target_view(float target_angle, uint8_t percent);
     void update_homing_view();
     void update_manual_view(long pos_ticks);
+    void update_manual_view_raw(const char *line1, const char *line2);
     void show_short_message(char *line1, char *line2, uint32_t time_ms);
     void cycle_colors();
     void startup_animation();

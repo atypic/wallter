@@ -43,7 +43,7 @@ static uint32_t g_target_ticks[MAX_ANGLES] = {0};
 static float g_target_angles[MAX_ANGLES] = {0.0f};
 static uint32_t g_target_idx = 0;
 
-static wallter::calibration::CalMeta g_cal_meta = { (uint8_t)DEFAULT_CAL_MIN_ANGLE, (uint8_t)DEFAULT_CAL_MAX_ANGLE, (int8_t)DEFAULT_ACCEL_ANGLE_OFFSET_TENTHS };
+static wallter::calibration::CalMeta g_cal_meta = { (uint8_t)DEFAULT_CAL_MIN_ANGLE, (uint8_t)DEFAULT_CAL_MAX_ANGLE, (int8_t)DEFAULT_ACCEL_ANGLE_OFFSET_TENTHS, 0, 0 };
 static int g_min_target_idx = 0;
 static int g_max_target_idx = 0;
 
@@ -170,28 +170,38 @@ extern "C" void app_main(void) {
         // Clear any latched interrupt flags before entering menu.
         wallter::inputs::clear_button_events();
 
-        wallter::modes::BootMenuChoice choice = wallter::modes::run_boot_menu(svc);
-        if (choice == wallter::modes::MENU_SET_MAX_ANGLE) {
-            wallter::modes::run_set_max_angle_mode(svc);
-        } else if (choice == wallter::modes::MENU_SET_MIN_ANGLE) {
-            wallter::modes::run_set_min_angle_mode(svc);
-        } else if (choice == wallter::modes::MENU_SET_OFFSET) {
-            wallter::modes::run_set_angle_offset_mode(svc);
-        } else if (choice == wallter::modes::MENU_SELF_TEST) {
-            wallter::modes::run_self_test_sequence(svc);
-        } else if (choice == wallter::modes::MENU_HAL_TEST) {
-            wallter::modes::run_hal_feedback_test(svc);
-        } else if (choice == wallter::modes::MENU_RESET_CAL) {
-            wallter::modes::run_reset_calibration_data(svc);
-        } else {
-            display.print("Jog mode", "Starting...");
-            wallter::modes::run_jog_mode(svc);
+        // Loop: run menu items and return to menu until self-test or normal boot.
+        bool exit_menu = false;
+        while (!exit_menu) {
+            wallter::modes::BootMenuChoice choice = wallter::modes::run_boot_menu(svc);
+            if (choice == wallter::modes::MENU_SET_MAX_ANGLE) {
+                wallter::modes::run_set_max_angle_mode(svc);
+            } else if (choice == wallter::modes::MENU_SET_MIN_ANGLE) {
+                wallter::modes::run_set_min_angle_mode(svc);
+            } else if (choice == wallter::modes::MENU_SET_OFFSET) {
+                wallter::modes::run_set_angle_offset_mode(svc);
+            } else if (choice == wallter::modes::MENU_SELF_TEST) {
+                wallter::modes::run_self_test_sequence(svc);
+                exit_menu = true;
+            } else if (choice == wallter::modes::MENU_HAL_TEST) {
+                wallter::modes::run_hal_feedback_test(svc);
+            } else if (choice == wallter::modes::MENU_RESET_CAL) {
+                wallter::modes::run_reset_calibration_data(svc);
+            } else if (choice == wallter::modes::MENU_TEST_ACCEL) {
+                wallter::modes::run_test_accel_mode(svc);
+            } else if (choice == wallter::modes::MENU_CAL_ACCEL) {
+                wallter::modes::run_cal_accel_mode(svc);
+            } else {
+                display.print("Jog mode", "Starting...");
+                wallter::modes::run_jog_mode(svc);
+            }
+
+            // Re-load calibration after each menu action.
+            load_calibration_all();
+            wallter::control::update_limits(g_min_target_idx, g_max_target_idx);
+            wallter::inputs::clear_button_events();
         }
 
-        // Re-load calibration after a calibration run (ensures interpolation is applied consistently)
-        load_calibration_all();
-        wallter::control::update_limits(g_min_target_idx, g_max_target_idx);
-        wallter::inputs::clear_button_events();
         wallter::inputs::clear_boot_menu_requested();
         wallter::inputs::clear_skip_self_test_requested();
     } else {

@@ -1,6 +1,7 @@
 #include "modes.hpp"
 
 #include "app_config.hpp"
+#include "accel.hpp"
 #include "angle_utils.hpp"
 #include "calibration_store.hpp"
 #include "commands.hpp"
@@ -29,7 +30,7 @@ BootMenuChoice run_boot_menu(Services &svc) {
     bool prev_extend = false;
     bool prev_retract = false;
 
-    static const char *items[] = {"Set max angle", "Set min angle", "Angle offset", "Run self test", "Jog mode", "HAL test", "Reset cal"};
+    static const char *items[] = {"Set max angle", "Set min angle", "Angle offset", "Run self test", "Jog mode", "HAL test", "Reset cal", "Test accel", "Cal accel"};
     static constexpr int kNumItems = (int)(sizeof(items) / sizeof(items[0]));
 
     svc.display->set_refresh_rate(0.2f);
@@ -75,7 +76,9 @@ BootMenuChoice run_boot_menu(Services &svc) {
             if (sel == 3) return MENU_SELF_TEST;
             if (sel == 4) return MENU_JOG;
             if (sel == 5) return MENU_HAL_TEST;
-            return MENU_RESET_CAL;
+            if (sel == 6) return MENU_RESET_CAL;
+            if (sel == 7) return MENU_TEST_ACCEL;
+            return MENU_CAL_ACCEL;
         }
 
         prev_extend = extend;
@@ -748,6 +751,97 @@ void run_jog_mode(Services &svc) {
 
         prev_both = both;
         vTaskDelay(pdMS_TO_TICKS(60));
+    }
+}
+
+void run_test_accel_mode(Services &svc) {
+    svc.display->set_refresh_rate(0.2f);
+    svc.display->print("Test accel", "Reading...");
+
+    // Press both buttons simultaneously to exit.
+    bool prev_both = false;
+    while (1) {
+        wallter::accel::update(0.0f);
+        float angle = wallter::accel::read_angle_deg();
+
+        char line2[17];
+        snprintf(line2, sizeof(line2), "Angle: %.1f", (double)angle);
+        svc.display->print("Test accel", line2);
+        svc.display->trigger_refresh();
+
+        bool ext = svc.read_extend_pressed();
+        bool ret = svc.read_retract_pressed();
+        bool both = ext && ret;
+        if (both && !prev_both) break;
+        prev_both = both;
+
+        vTaskDelay(pdMS_TO_TICKS(100));
+    }
+}
+
+void run_cal_accel_mode(Services &svc) {
+    if (!svc.cal_meta) {
+        svc.panicf("NO META");
+    }
+
+    // Current offset in tenths of a degree.
+    int ofs = (int)svc.cal_meta->angle_offset_tenths;
+
+    svc.display->set_refresh_rate(0.2f);
+
+    // Wait for buttons release from menu selection.
+    while (svc.read_extend_pressed() || svc.read_retract_pressed()) {
+        vTaskDelay(pdMS_TO_TICKS(30));
+    }
+
+    bool prev_ext = false;
+    bool prev_ret = false;
+
+    while (1) {
+        wallter::accel::update(0.0f);
+        float angle = wallter::accel::read_angle_deg();
+
+        char line1[17];
+        char line2[17];
+        snprintf(line1, sizeof(line1), "Ang:%.1f", (double)angle);
+        float ofs_deg = (float)ofs * 0.1f;
+        snprintf(line2, sizeof(line2), "O:%+.1f E+ R-", (double)ofs_deg);
+        svc.display->print(line1, line2);
+        svc.display->trigger_refresh();
+
+        bool ext = svc.read_extend_pressed();
+        bool ret = svc.read_retract_pressed();
+
+        // Both pressed: save and exit.
+        if (ext && ret) {
+            svc.cal_meta->angle_offset_tenths = (int8_t)ofs;
+            wallter::accel::set_angle_offset((float)ofs * 0.1f);
+            (void)wallter::calibration::save_meta(*svc.cal_meta);
+
+            svc.display->print("Offset saved", "");
+            svc.display->trigger_refresh();
+            uint64_t end = svc.now_ms() + 800ULL;
+            while (svc.now_ms() < end) {
+                svc.display->refresh();
+                vTaskDelay(pdMS_TO_TICKS(30));
+            }
+            return;
+        }
+
+        // EXTEND: increase offset by 0.1°
+        if (ext && !prev_ext) {
+            if (ofs < 127) ofs++;
+            wallter::accel::set_angle_offset((float)ofs * 0.1f);
+        }
+        // RETRACT: decrease offset by 0.1°
+        if (ret && !prev_ret) {
+            if (ofs > -127) ofs--;
+            wallter::accel::set_angle_offset((float)ofs * 0.1f);
+        }
+
+        prev_ext = ext;
+        prev_ret = ret;
+        vTaskDelay(pdMS_TO_TICKS(100));
     }
 }
 

@@ -176,6 +176,12 @@ void Display::update_manual_view(long pos_ticks) {
     next_view = LCD_MANUAL_VIEW;
 }
 
+void Display::update_manual_view_raw(const char *line1, const char *line2) {
+    snprintf(view_buffers[LCD_MANUAL_VIEW][0], 17, "%-16.16s", line1 ? line1 : "");
+    snprintf(view_buffers[LCD_MANUAL_VIEW][1], 17, "%-16.16s", line2 ? line2 : "");
+    next_view = LCD_MANUAL_VIEW;
+}
+
 void Display::show_short_message(char *line1, char *line2, uint32_t time_ms) {
     snprintf(view_buffers[LCD_SHORT_MESSAGE_VIEW][0], 17, "%.*s", 16, line1);
     snprintf(view_buffers[LCD_SHORT_MESSAGE_VIEW][1], 17, "%.*s", 16, line2);

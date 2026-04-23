@@ -137,9 +137,9 @@ void panicf(const char *fmt, ...) {
         g_ctx.motors[i].setSpeed(0);
     }
 
-    char line1[17];
-    snprintf(line1, sizeof(line1), "PANIC:");
-    g_ctx.display->print(line1, buf);
+    // Use the manual view buffer so the message survives periodic LCD reinits.
+    g_ctx.display->update_manual_view_raw("PANIC:", buf);
+    g_ctx.display->set_view(LCD_MANUAL_VIEW);
 
     uint64_t end_ms = now_ms() + 2000ULL;
     while (now_ms() < end_ms) {
