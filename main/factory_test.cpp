@@ -199,101 +199,95 @@ static void slow_toggle_opendrain(gpio_num_t pin, int cycles, int half_period_ms
     }
 }
 
-static bool loopback_drive_and_sense(gpio_num_t drive, gpio_num_t sense, int toggles, int settle_ms) {
-    esp_err_t err;
+// Bare-bones continuity check between two pins.
+// Configures pin_a as push-pull OUTPUT and pin_b as INPUT (no pulls).
+// Drives pin_a high then low, reads pin_b each time.
+static bool continuity_check(gpio_num_t pin_a, gpio_num_t pin_b) {
+    ESP_LOGI(TAG, "  Configuring GPIO%d as OUTPUT, GPIO%d as INPUT (no pull)", (int)pin_a, (int)pin_b);
 
-    err = configure_gpio_output(drive);
-    if (err != ESP_OK) {
-        ESP_LOGW(TAG, "GPIO%d cannot be OUTPUT (err=%d)", (int)drive, (int)err);
-        return false;
+    // Reset both pins first to clear any prior configuration
+    gpio_reset_pin(pin_a);
+    gpio_reset_pin(pin_b);
+    vTaskDelay(pdMS_TO_TICKS(10));
+
+    gpio_set_direction(pin_a, GPIO_MODE_OUTPUT);
+    gpio_set_direction(pin_b, GPIO_MODE_INPUT);
+    gpio_set_pull_mode(pin_b, GPIO_FLOATING);
+    vTaskDelay(pdMS_TO_TICKS(10));
+
+    // Drive HIGH
+    gpio_set_level(pin_a, 1);
+    vTaskDelay(pdMS_TO_TICKS(100));
+    int r1 = gpio_get_level(pin_a);
+    int s1 = gpio_get_level(pin_b);
+    ESP_LOGI(TAG, "  GPIO%d=1 (readback=%d), GPIO%d reads %d", (int)pin_a, r1, (int)pin_b, s1);
+
+    // Drive LOW
+    gpio_set_level(pin_a, 0);
+    vTaskDelay(pdMS_TO_TICKS(100));
+    int r0 = gpio_get_level(pin_a);
+    int s0 = gpio_get_level(pin_b);
+    ESP_LOGI(TAG, "  GPIO%d=0 (readback=%d), GPIO%d reads %d", (int)pin_a, r0, (int)pin_b, s0);
+
+    // Clean up
+    gpio_reset_pin(pin_a);
+    gpio_reset_pin(pin_b);
+
+    bool pass = (s1 == 1 && s0 == 0);
+    if (!pass) {
+        // Try the other direction
+        ESP_LOGI(TAG, "  Trying reverse: GPIO%d as OUTPUT, GPIO%d as INPUT", (int)pin_b, (int)pin_a);
+        gpio_reset_pin(pin_a);
+        gpio_reset_pin(pin_b);
+        vTaskDelay(pdMS_TO_TICKS(10));
+
+        gpio_set_direction(pin_b, GPIO_MODE_OUTPUT);
+        gpio_set_direction(pin_a, GPIO_MODE_INPUT);
+        gpio_set_pull_mode(pin_a, GPIO_FLOATING);
+        vTaskDelay(pdMS_TO_TICKS(10));
+
+        gpio_set_level(pin_b, 1);
+        vTaskDelay(pdMS_TO_TICKS(100));
+        r1 = gpio_get_level(pin_b);
+        s1 = gpio_get_level(pin_a);
+        ESP_LOGI(TAG, "  GPIO%d=1 (readback=%d), GPIO%d reads %d", (int)pin_b, r1, (int)pin_a, s1);
+
+        gpio_set_level(pin_b, 0);
+        vTaskDelay(pdMS_TO_TICKS(100));
+        r0 = gpio_get_level(pin_b);
+        s0 = gpio_get_level(pin_a);
+        ESP_LOGI(TAG, "  GPIO%d=0 (readback=%d), GPIO%d reads %d", (int)pin_b, r0, (int)pin_a, s0);
+
+        gpio_reset_pin(pin_a);
+        gpio_reset_pin(pin_b);
+
+        pass = (s1 == 1 && s0 == 0);
     }
-    err = configure_gpio_input_pulldown(sense);
-    if (err != ESP_OK) {
-        ESP_LOGW(TAG, "GPIO%d cannot be INPUT pulldown (err=%d)", (int)sense, (int)err);
-        return false;
-    }
-
-    // Baseline check: if sense follows drive even with just DC levels,
-    // it's almost certainly hard-connected (or pulled strongly).
-    gpio_set_level(drive, 0);
-    vTaskDelay(pdMS_TO_TICKS(50));
-    int base0 = stable_read_level(sense, /*samples*/9, /*sample_delay_ms*/0);
-    gpio_set_level(drive, 1);
-    vTaskDelay(pdMS_TO_TICKS(50));
-    int base1 = stable_read_level(sense, /*samples*/9, /*sample_delay_ms*/0);
-    ESP_LOGI(TAG, "Baseline: drive GPIO%d=0 -> sense GPIO%d=%d, drive=1 -> sense=%d", (int)drive, (int)sense, base0, base1);
-
-    int matches = 0;
-    int total = 0;
-    bool saw0 = false;
-    bool saw1 = false;
-
-    uint32_t prng = 0xA5A5F00Du ^ (uint32_t)drive ^ ((uint32_t)sense << 8);
-
-    for (int i = 0; i < toggles; ++i) {
-        int level = (int)(lfsr_next(prng) & 1u);
-        gpio_set_level(drive, level);
-        vTaskDelay(pdMS_TO_TICKS(settle_ms));
-
-        int read = stable_read_level(sense, /*samples*/5, /*sample_delay_ms*/0);
-        saw0 |= (read == 0);
-        saw1 |= (read == 1);
-        if (read == level) {
-            matches++;
-        }
-        total++;
-    }
-
-    ESP_LOGI(TAG,
-             "Loopback drive GPIO%d -> sense GPIO%d: %d/%d matches (saw0=%d saw1=%d)",
-             (int)drive,
-             (int)sense,
-             matches,
-             total,
-             saw0 ? 1 : 0,
-             saw1 ? 1 : 0);
-
-    // Require near-perfect match AND that we observed both levels on the sensed pin.
-    return (matches >= (total - 1)) && saw0 && saw1;
+    return pass;
 }
 
-static bool loopback_hal_clk_cnt(int motor_index, int toggles, int settle_ms) {
-    gpio_num_t clk = static_cast<gpio_num_t>(HAL_CLK[motor_index]);
-    gpio_num_t cnt = static_cast<gpio_num_t>(HAL_CNT[motor_index]);
+static void step_continuity_check() {
+    ESP_LOGI(TAG, "=== STEP: Encoder pin continuity check ===");
+    ESP_LOGI(TAG, "Install 2 jumpers:");
+    ESP_LOGI(TAG, "  M1 CLK (GPIO%d) <-> M2 CLK (GPIO%d)", (int)HAL_CLK[0], (int)HAL_CLK[1]);
+    ESP_LOGI(TAG, "  M1 CNT (GPIO%d) <-> M2 CNT (GPIO%d)", (int)HAL_CNT[0], (int)HAL_CNT[1]);
+    ESP_LOGI(TAG, "Press EXTEND when jumpers are installed.");
+    wait_for_extend_press("jumpers installed");
 
-    // Drive whichever side is actually output-capable.
-    gpio_num_t drive = GPIO_IS_VALID_OUTPUT_GPIO(clk) ? clk : cnt;
-    gpio_num_t sense = (drive == clk) ? cnt : clk;
+    gpio_num_t clk0 = static_cast<gpio_num_t>(HAL_CLK[0]);
+    gpio_num_t clk1 = static_cast<gpio_num_t>(HAL_CLK[1]);
+    gpio_num_t cnt0 = static_cast<gpio_num_t>(HAL_CNT[0]);
+    gpio_num_t cnt1 = static_cast<gpio_num_t>(HAL_CNT[1]);
 
-    if (!GPIO_IS_VALID_OUTPUT_GPIO(drive)) {
-        ESP_LOGE(TAG,
-                 "Motor %d loopback: neither HAL_CLK(GPIO%d) nor HAL_CNT(GPIO%d) is output-capable; cannot test",
-                 motor_index + 1,
-                 (int)clk,
-                 (int)cnt);
-        return false;
-    }
+    ESP_LOGI(TAG, "Testing CLK path: GPIO%d <-> GPIO%d", (int)clk0, (int)clk1);
+    bool clk_ok = continuity_check(clk0, clk1);
+    ESP_LOGW(TAG, "CLK continuity: %s", clk_ok ? "PASS" : "FAIL");
 
-    ESP_LOGI(TAG,
-             "Motor %d loopback: driving GPIO%d (output-capable), sensing GPIO%d",
-             motor_index + 1,
-             (int)drive,
-             (int)sense);
+    ESP_LOGI(TAG, "Testing CNT path: GPIO%d <-> GPIO%d", (int)cnt0, (int)cnt1);
+    bool cnt_ok = continuity_check(cnt0, cnt1);
+    ESP_LOGW(TAG, "CNT continuity: %s", cnt_ok ? "PASS" : "FAIL");
 
-    bool ok = loopback_drive_and_sense(drive, sense, toggles, settle_ms);
-
-    // If both pins are output-capable, try the reverse direction too (helpful if one side is loaded).
-    if (!ok && GPIO_IS_VALID_OUTPUT_GPIO(clk) && GPIO_IS_VALID_OUTPUT_GPIO(cnt)) {
-        ESP_LOGW(TAG, "Motor %d loopback: first direction failed; trying reverse", motor_index + 1);
-        ok = loopback_drive_and_sense(sense, drive, toggles, settle_ms);
-    }
-
-    ESP_LOGI(TAG, "Motor %d loopback pins: HAL_CLK(GPIO%d) <-> HAL_CNT(GPIO%d) result=%s",
-             motor_index + 1,
-             (int)clk,
-             (int)cnt,
-             ok ? "PASS" : "FAIL");
-    return ok;
+    ESP_LOGW(TAG, "Continuity result: %s", (clk_ok && cnt_ok) ? "ALL PASS" : "FAIL");
 }
 
 static void set_all_pwm_off() {
@@ -308,17 +302,6 @@ static void set_all_dir_safe() {
     }
 }
 
-static void step_loopback_auto(int motor_index) {
-    int label = motor_index + 1;
-    ESP_LOGI(TAG, "=== STEP: Motor %d encoder loopback (HAL_CLK%d <-> HAL_CNT%d) ===", label, label, label);
-    ESP_LOGI(TAG, "Install jumper: HAL_CLK(GPIO%d) <-> HAL_CNT(GPIO%d) for Motor %d",
-             (int)HAL_CLK[motor_index],
-             (int)HAL_CNT[motor_index],
-             label);
-
-    bool ok = loopback_hal_clk_cnt(motor_index, /*toggles*/40, /*settle_ms*/30);
-    ESP_LOGW(TAG, "Motor %d loopback result: %s", label, ok ? "PASS" : "FAIL");
-}
 
 static void step_output_multimeter(int motor_index, int pwm_channel) {
     int label = motor_index + 1;
@@ -426,9 +409,8 @@ static void step_output_multimeter(int motor_index, int pwm_channel) {
     }
 
     ESP_LOGI(TAG, "Instructions:");
-    ESP_LOGI(TAG, "  - Test always starts at Motor 1 (index 0). Press EXTEND to advance steps.");
-    ESP_LOGI(TAG, "  - STEP A: automatic HAL_CLK/HAL_CNT loopback check for that motor.");
-    ESP_LOGI(TAG, "  - STEP B: output PWM/DIR for that motor so you can probe with a multimeter.");
+    ESP_LOGI(TAG, "  - Cross-motor encoder loopback: tests all 4 HAL pins with 2 jumpers.");
+    ESP_LOGI(TAG, "  - Then PWM/DIR output test for each motor (probe with multimeter).");
 
     // Configure EXTEND/RETRACT buttons as inputs (active-low).
     ESP_ERROR_CHECK(configure_gpio_input_pullup(static_cast<gpio_num_t>(BUTTON_EXTEND_PIN)));
@@ -463,19 +445,19 @@ static void step_output_multimeter(int motor_index, int pwm_channel) {
     set_all_dir_safe();
 
     while (true) {
+        // Encoder pin continuity check (all 4 HAL pins with 2 jumpers)
+        step_continuity_check();
+
         // Motor 0 (Motor 1 in operator labeling)
-        step_loopback_auto(0);
         wait_for_extend_press("next: Motor 1 PWM/DIR output");
         step_output_multimeter(0, 0);
 
         // Motor 1 (Motor 2 in operator labeling)
-        wait_for_extend_press("next: Motor 2 loopback auto-check");
-        step_loopback_auto(1);
         wait_for_extend_press("next: Motor 2 PWM/DIR output");
         step_output_multimeter(1, 1);
 
         ESP_LOGI(TAG, "Factory test complete.");
-        wait_for_extend_press("repeat from Motor 1");
+        wait_for_extend_press("repeat from start");
     }
 }
 

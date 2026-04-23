@@ -157,8 +157,8 @@ static const bool g_has_keypad = false;
 #define LCD_SDA_PIN 7
 #define LCD_SCL_PIN 6
 #define LCD_I2C_CLOCK_HZ 50000
-static const unsigned int HAL_CLK[NUM_MOTORS] = {35, 11};
-static const unsigned int HAL_CNT[NUM_MOTORS] = {37, 13};
+static const unsigned int HAL_CLK[NUM_MOTORS] = {2, 11};
+static const unsigned int HAL_CNT[NUM_MOTORS] = {1, 13};
 
 // Encoder interpretation / filtering.
 // If HAL_CNT (direction) is floating/miswired, the direction bit will look random
