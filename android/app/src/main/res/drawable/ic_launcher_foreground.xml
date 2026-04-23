@@ -1,0 +1,100 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <!-- Climbing wall panel (tilted rectangle) -->
+    <path
+        android:fillColor="#222222"
+        android:pathData="M28,22 L80,18 L82,88 L26,92 Z" />
+
+    <!-- Wall surface texture lines -->
+    <path
+        android:strokeColor="#444444"
+        android:strokeWidth="0.8"
+        android:pathData="M32,22 L30,92" />
+    <path
+        android:strokeColor="#444444"
+        android:strokeWidth="0.8"
+        android:pathData="M45,21 L43,91" />
+    <path
+        android:strokeColor="#444444"
+        android:strokeWidth="0.8"
+        android:pathData="M58,20 L56,90" />
+    <path
+        android:strokeColor="#444444"
+        android:strokeWidth="0.8"
+        android:pathData="M71,19 L69,89" />
+
+    <!-- Horizontal panel lines -->
+    <path
+        android:strokeColor="#444444"
+        android:strokeWidth="0.8"
+        android:pathData="M27,40 L81,37" />
+    <path
+        android:strokeColor="#444444"
+        android:strokeWidth="0.8"
+        android:pathData="M27,58 L81,55" />
+    <path
+        android:strokeColor="#444444"
+        android:strokeWidth="0.8"
+        android:pathData="M26,76 L82,73" />
+
+    <!-- Climbing holds (various shapes) -->
+    <!-- Hold 1 - top left -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M38,30 C40,28 44,29 43,32 C42,35 37,34 38,30 Z" />
+
+    <!-- Hold 2 - top right -->
+    <path
+        android:fillColor="#CCCCCC"
+        android:pathData="M64,27 L68,26 L69,30 L65,31 Z" />
+
+    <!-- Hold 3 - middle left -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M34,50 C36,47 40,48 39,52 C38,55 33,53 34,50 Z" />
+
+    <!-- Hold 4 - center -->
+    <path
+        android:fillColor="#DDDDDD"
+        android:pathData="M52,46 L57,44 L58,49 L54,51 L51,49 Z" />
+
+    <!-- Hold 5 - middle right -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M72,44 C74,42 77,43 76,46 C75,49 71,47 72,44 Z" />
+
+    <!-- Hold 6 - lower left -->
+    <path
+        android:fillColor="#CCCCCC"
+        android:pathData="M40,67 L44,66 L45,70 L41,71 Z" />
+
+    <!-- Hold 7 - lower center -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M58,64 C60,62 64,63 63,66 C62,69 57,67 58,64 Z" />
+
+    <!-- Hold 8 - bottom -->
+    <path
+        android:fillColor="#DDDDDD"
+        android:pathData="M48,82 L53,80 L54,85 L49,86 Z" />
+
+    <!-- Hold 9 - bottom right -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M68,78 C70,76 73,77 72,80 C71,83 67,81 68,78 Z" />
+
+    <!-- Tilt indicator arrow (bottom) -->
+    <path
+        android:fillColor="#888888"
+        android:strokeColor="#888888"
+        android:strokeWidth="1.5"
+        android:pathData="M16,55 L22,55" />
+    <path
+        android:fillColor="#888888"
+        android:pathData="M22,52 L26,55 L22,58 Z" />
+
+</vector>
