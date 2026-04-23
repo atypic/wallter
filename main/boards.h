@@ -14,7 +14,7 @@
 #define BOARD_TYPE_SLUPPEN_PROTO 4
 
 // Unified firmware version — update on each release.
-#define FW_VERSION "2.2.0"
+#define FW_VERSION "2.0.0"
 
 // Select board via unified BOARD_TYPE macro (see boards.h for constants)
 // #define BOARD_TYPE BOARD_TYPE_LEANGEN_4_MOTOR
