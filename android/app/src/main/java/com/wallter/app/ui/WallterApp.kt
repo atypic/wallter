@@ -27,6 +27,8 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.runtime.Composable
@@ -87,6 +89,14 @@ fun WallterApp(viewModel: MainViewModel) {
 
     val ui by viewModel.uiState.collectAsState()
     var mode by remember { mutableStateOf(Mode.Control) }
+    val snackbarHostState = remember { SnackbarHostState() }
+
+    // Show snackbar when settings save result changes.
+    LaunchedEffect(ui.settingsSaveResult) {
+        val msg = ui.settingsSaveResult ?: return@LaunchedEffect
+        snackbarHostState.showSnackbar(msg)
+        viewModel.clearSettingsSaveResult()
+    }
 
     LaunchedEffect(mode) {
         if (mode == Mode.Maintenance && ui.availableFirmwares.isEmpty() && !ui.isLoadingFirmwares) {
@@ -96,7 +106,9 @@ fun WallterApp(viewModel: MainViewModel) {
 
     // Local file picking is intentionally removed in favor of listing public GitHub releases.
 
-    Scaffold { padding ->
+    Scaffold(
+        snackbarHost = { SnackbarHost(snackbarHostState) },
+    ) { padding ->
         PullToRefreshBox(
             isRefreshing = ui.isLoadingFirmwares,
             onRefresh = { viewModel.refreshAvailableFirmwares() },

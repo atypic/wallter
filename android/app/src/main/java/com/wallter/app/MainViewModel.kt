@@ -44,6 +44,7 @@ data class UiState(
     val deviceSettings: WallterBleClient.DeviceSettings? = null,
     val deviceFirmwareVersion: String? = null,
     val deviceName: String? = null,
+    val settingsSaveResult: String? = null,
 )
 
 data class FirmwareAsset(
@@ -81,6 +82,7 @@ class MainViewModel : ViewModel() {
     private val deviceSettings = MutableStateFlow<WallterBleClient.DeviceSettings?>(null)
     private val deviceFirmwareVersion = MutableStateFlow<String?>(null)
     private val deviceName = MutableStateFlow<String?>(null)
+    private val settingsSaveResult = MutableStateFlow<String?>(null)
 
     val uiState: StateFlow<UiState> = combine(
         permissionsGranted,
@@ -110,6 +112,7 @@ class MainViewModel : ViewModel() {
         .combine(deviceSettings) { s, ds -> s.copy(deviceSettings = ds) }
         .combine(deviceFirmwareVersion) { s, v -> s.copy(deviceFirmwareVersion = v) }
         .combine(deviceName) { s, n -> s.copy(deviceName = n) }
+        .combine(settingsSaveResult) { s, r -> s.copy(settingsSaveResult = r) }
         .stateIn(viewModelScope, kotlinx.coroutines.flow.SharingStarted.Eagerly, UiState())
 
     fun onPermissionsResult(grants: Map<String, Boolean>) {
@@ -362,6 +365,7 @@ class MainViewModel : ViewModel() {
                 val s = c.readSettings()
                 deviceSettings.value = s
                 deviceName.value = c.readDeviceName()
+                settingsSaveResult.value = "Settings refreshed"
             } catch (t: Throwable) {
                 lastError.value = t.message ?: t.toString()
             }
@@ -383,8 +387,10 @@ class MainViewModel : ViewModel() {
                 )
                 c.writeSettings(s)
                 deviceSettings.value = s
+                settingsSaveResult.value = "Settings saved"
             } catch (t: Throwable) {
                 lastError.value = t.message ?: t.toString()
+                settingsSaveResult.value = "Save failed"
             }
         }
     }
@@ -396,10 +402,16 @@ class MainViewModel : ViewModel() {
                 lastError.value = null
                 c.writeDeviceName(name)
                 deviceName.value = name
+                settingsSaveResult.value = "Name updated (reboot device to apply)"
             } catch (t: Throwable) {
                 lastError.value = t.message ?: t.toString()
+                settingsSaveResult.value = "Name save failed"
             }
         }
+    }
+
+    fun clearSettingsSaveResult() {
+        settingsSaveResult.value = null
     }
 
     fun startOta(context: Context) {
