@@ -396,7 +396,7 @@ private fun DeviceSettingsSection(
     var minAngle by remember(settings) { mutableStateOf(settings?.minAngleDeg?.toString() ?: "") }
     var maxAngle by remember(settings) { mutableStateOf(settings?.maxAngleDeg?.toString() ?: "") }
     var offsetDeg by remember(settings) {
-        mutableStateOf(settings?.angleOffsetTenths?.let { "%.1f".format(it / 10f) } ?: "")
+        mutableStateOf(settings?.angleOffsetTenths?.let { String.format(java.util.Locale.US, "%.1f", it / 10f) } ?: "")
     }
     var extendSpeed by remember(settings) { mutableStateOf(settings?.maxExtendSpeed?.toString() ?: "0") }
     var retractSpeed by remember(settings) { mutableStateOf(settings?.maxRetractSpeed?.toString() ?: "0") }
@@ -453,7 +453,7 @@ private fun DeviceSettingsSection(
                     onClick = {
                         val min = minAngle.toIntOrNull() ?: return@Button
                         val max = maxAngle.toIntOrNull() ?: return@Button
-                        val ofs = offsetDeg.toFloatOrNull() ?: return@Button
+                        val ofs = offsetDeg.replace(',', '.').toFloatOrNull() ?: return@Button
                         val ext = extendSpeed.toIntOrNull() ?: return@Button
                         val ret = retractSpeed.toIntOrNull() ?: return@Button
                         onSave(min, max, (ofs * 10f).toInt(), ext, ret)
