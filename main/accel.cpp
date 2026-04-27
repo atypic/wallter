@@ -159,8 +159,18 @@ void update(float direction_hint) {
     // Stage 1: EMA smoothing.
     float ema = kAlpha * raw + (1.0f - kAlpha) * g_filtered_angle;
 
+    // Stage 2: Directional clamp.  Once moving, the angle must not go
+    // backwards relative to the commanded direction.
+    //   direction_hint > 0 → extending  → angle may only increase
+    //   direction_hint < 0 → retracting → angle may only decrease
+    //   direction_hint == 0 → stopped   → no clamp
+    if (direction_hint > 0.0f && ema < g_filtered_angle) {
+        ema = g_filtered_angle;
+    } else if (direction_hint < 0.0f && ema > g_filtered_angle) {
+        ema = g_filtered_angle;
+    }
+
     g_filtered_angle = ema;
-    (void)direction_hint;
 }
 
 float read_angle_deg() {

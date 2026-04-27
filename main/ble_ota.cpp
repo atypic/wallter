@@ -615,9 +615,19 @@ static void advertise() {
     fields.uuids128_is_complete = 1;
 
     const char *name = ble_svc_gap_device_name();
-    fields.name = (const uint8_t *)name;
-    fields.name_len = (uint8_t)strlen(name);
-    fields.name_is_complete = 1;
+    uint8_t name_len = (uint8_t)strlen(name);
+    // BLE adv payload is 31 bytes max.  Flags(3) + UUID128(18) = 21 overhead,
+    // leaving 10 bytes for the name AD structure (8 chars + 2 overhead).
+    static constexpr uint8_t kMaxAdvName = 8;
+    if (name_len > kMaxAdvName) {
+        fields.name = (const uint8_t *)name;
+        fields.name_len = kMaxAdvName;
+        fields.name_is_complete = 0;
+    } else {
+        fields.name = (const uint8_t *)name;
+        fields.name_len = name_len;
+        fields.name_is_complete = 1;
+    }
 
     rc = ble_gap_adv_set_fields(&fields);
     if (rc != 0) {
