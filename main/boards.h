@@ -14,7 +14,7 @@
 #define BOARD_TYPE_SLUPPEN_PROTO 4
 
 // Unified firmware version — update on each release.
-#define FW_VERSION "2.0.4"
+#define FW_VERSION "2.0.5"
 
 // Select board via unified BOARD_TYPE macro (see boards.h for constants)
 // #define BOARD_TYPE BOARD_TYPE_LEANGEN_4_MOTOR
@@ -140,8 +140,8 @@ static const bool g_has_keypad = false;
 #define MASTER_MOTOR 0
 
 #define ACCEL_STEP 1
-#define MINSPEED (200)
 #define MAXSPEED (250)
+#define MINSPEED (MAXSPEED - 10)
 #define MASTER_MAX (250)
 
 #define NUM_MOTORS 2
