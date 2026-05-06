@@ -44,18 +44,17 @@ static bool g_master_moved_since_cmd = false;
 static uint32_t g_master_last_si = 0;
 static uint32_t g_master_last_so = 0;
 
-// Homing stall/timeout tracking (used to avoid getting stuck in CMD_HOME).
-static uint32_t g_home_last_steps_in = 0;
-static uint64_t g_home_last_steps_in_change_ms = 0;
+// Homing completion tracking (angle-based).
+// Drive retract until the accelerometer angle has been stable (within
+// kHomeAngleStableDeg) for kHomeStableMs. A small minimum runtime prevents
+// instant completion before the motor has a chance to start moving.
 static uint64_t g_home_start_ms = 0;
-static uint32_t g_home_steps_in_motion_base = 0;
-static uint64_t g_home_last_motion_ms = 0;
-static bool g_home_saw_steps_in_motion = false;
+static uint64_t g_home_stable_since_ms = 0;
+static float    g_home_stable_anchor_deg = 0.0f;
 
-static constexpr uint32_t kHomeNoStepsInMs = 800;
-static constexpr uint32_t kHomeStepsInMotionDelta = 5;
-static constexpr uint32_t kHomeMinRuntimeMs = 1000;
-static constexpr uint32_t kHomeIdleDoneMs = 2000;
+static constexpr uint32_t kHomeMinRuntimeMs   = 500;     // ignore the first 0.5 s
+static constexpr uint32_t kHomeStableMs       = 5000;    // 5 s of "no movement"
+static constexpr float    kHomeAngleStableDeg = 0.5f;    // tolerance window (°)
 
 static inline uint64_t now_ms() {
     return (uint64_t)(esp_timer_get_time() / 1000ULL);
@@ -75,13 +74,10 @@ static inline bool throttle(uint64_t &last_ms, uint32_t period_ms) {
 }
 
 static void reset_home_tracking() {
-    g_home_last_steps_in = g_ctx.motors[g_ctx.master_motor_index].getStepsIn();
     uint64_t n = now_ms();
-    g_home_last_steps_in_change_ms = n;
     g_home_start_ms = n;
-    g_home_steps_in_motion_base = g_home_last_steps_in;
-    g_home_last_motion_ms = n;
-    g_home_saw_steps_in_motion = false;
+    g_home_stable_since_ms = n;
+    g_home_stable_anchor_deg = wallter::accel::read_angle_deg();
 }
 
 void reset_idle_timer() {
@@ -278,63 +274,28 @@ static int32_t get_master_motor_speed() {
     if (g_current_cmd == wallter::CMD_HOME) {
         uint64_t n = now_ms();
 
-        // Fast path: if we've been idle for long enough during homing, we're bottomed out.
-        // This uses the same underlying step activity as the encoder counters, but avoids
-        // getting stuck on sporadic single-tick noise.
-        uint32_t idle_ms = g_ctx.motors[g_ctx.master_motor_index].getIdleDurationMs();
-        if (idle_ms >= kHomeIdleDoneMs) {
-            ESP_LOGI(TAG, "Home complete by idle: idleMs=%u pos=%ld si=%lu so=%lu",
-                     (unsigned)idle_ms,
-                     (long)g_ctx.motors[g_ctx.master_motor_index].getPosition(),
-                     (unsigned long)g_ctx.motors[g_ctx.master_motor_index].getStepsIn(),
-                     (unsigned long)g_ctx.motors[g_ctx.master_motor_index].getStepsOut());
+        // Angle-based completion: keep retracting until the accelerometer
+        // angle has stayed within +/- kHomeAngleStableDeg of an anchor for
+        // kHomeStableMs. The anchor is re-armed any time the angle drifts
+        // outside the window. A small minimum runtime prevents finishing
+        // before motion has had a chance to begin.
+        float fabs_diff = current_deg - g_home_stable_anchor_deg;
+        if (fabs_diff < 0.0f) fabs_diff = -fabs_diff;
+        if (fabs_diff > kHomeAngleStableDeg) {
+            g_home_stable_anchor_deg = current_deg;
+            g_home_stable_since_ms = n;
+        }
+
+        if ((n - g_home_start_ms) >= (uint64_t)kHomeMinRuntimeMs &&
+            (n - g_home_stable_since_ms) >= (uint64_t)kHomeStableMs) {
+            ESP_LOGI(TAG, "Home complete by angle stability: angle=%.2f anchor=%.2f stable_for=%llu ms",
+                     (double)current_deg, (double)g_home_stable_anchor_deg,
+                     (unsigned long long)(n - g_home_stable_since_ms));
             reset_tick_counters(0, true);
             reset_motor_positions();
             g_ctx.display->set_next_view(LCD_TARGET_VIEW);
             g_ctx.display->set_view(LCD_TARGET_VIEW);
             target_reached = true;
-        }
-
-        // Homing mode means: retract as much as possible; do not stop retracting
-        // until we observe no further movement on stepsIn.
-        uint32_t si = g_ctx.motors[g_ctx.master_motor_index].getStepsIn();
-
-        // Track any stepsIn changes (useful for debugging / sanity), but only treat
-        // sufficiently large deltas as real motion to avoid noise keeping us in HOME.
-        if (si != g_home_last_steps_in) {
-            g_home_last_steps_in = si;
-            g_home_last_steps_in_change_ms = n;
-        }
-
-        uint32_t delta_since_motion = (si >= g_home_steps_in_motion_base) ? (si - g_home_steps_in_motion_base) : 0;
-        if (delta_since_motion >= kHomeStepsInMotionDelta) {
-            g_home_steps_in_motion_base = si;
-            g_home_last_motion_ms = n;
-            g_home_saw_steps_in_motion = true;
-        }
-
-        if (!target_reached && g_home_saw_steps_in_motion) {
-            if ((n - g_home_last_motion_ms) > (uint64_t)kHomeNoStepsInMs) {
-                reset_tick_counters(0, true);
-                reset_motor_positions();
-                g_ctx.display->set_next_view(LCD_TARGET_VIEW);
-                g_ctx.display->set_view(LCD_TARGET_VIEW);
-                target_reached = true;
-            }
-        }
-
-        // If we never saw enough stepsIn to qualify as "real motion", we might already be
-        // bottomed out at the hard-stop. In that case we still want homing to complete once
-        // stepsIn has been stable for the same no-movement window.
-        if (!target_reached && !g_home_saw_steps_in_motion) {
-            if ((n - g_home_start_ms) > (uint64_t)kHomeMinRuntimeMs &&
-                (n - g_home_last_steps_in_change_ms) > (uint64_t)kHomeNoStepsInMs) {
-                reset_tick_counters(0, true);
-                reset_motor_positions();
-                g_ctx.display->set_next_view(LCD_TARGET_VIEW);
-                g_ctx.display->set_view(LCD_TARGET_VIEW);
-                target_reached = true;
-            }
         }
     } else if (g_current_cmd == wallter::CMD_RETRACT) {
         if (current_deg <= target_deg) {
