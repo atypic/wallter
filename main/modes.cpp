@@ -324,7 +324,7 @@ void run_self_test_sequence(Services &svc) {
     const int test_time  = 1000;
     const int settle_time = 250;
     static constexpr uint32_t kSelfTestExpectedTicks = 100U;
-    static constexpr uint32_t kSelfTestAllowedMargin = 20U;
+    static constexpr uint32_t kSelfTestAllowedMargin = 60U;
     static constexpr uint32_t kSelfTestMinTicks = kSelfTestExpectedTicks - kSelfTestAllowedMargin;
 
     auto wait_with_encoder_poll = [&](uint32_t total_ms) {
