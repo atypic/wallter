@@ -118,10 +118,14 @@ void run_set_max_angle_mode(Services &svc) {
     }
 
     // Snap the stored max angle to the nearest valid step; default to HIGHEST_ANGLE.
-    // Valid values are any ANGLE_STEP multiple in [ANGLE_STEP, HIGHEST_ANGLE].
+    // Valid values are any ANGLE_STEP multiple in [LOWEST_ANGLE, HIGHEST_ANGLE]
+    // and must remain >= the current min angle so save_meta() will accept it.
+    int cur_min_locked = (int)svc.cal_meta->min_angle_deg;
+    if (cur_min_locked < LOWEST_ANGLE) cur_min_locked = LOWEST_ANGLE;
     int cur_max = (int)svc.cal_meta->max_angle_deg;
-    if (cur_max < ANGLE_STEP || cur_max > HIGHEST_ANGLE || (cur_max % ANGLE_STEP) != 0) {
+    if (cur_max < cur_min_locked || cur_max > HIGHEST_ANGLE || (cur_max % ANGLE_STEP) != 0) {
         cur_max = DEFAULT_CAL_MAX_ANGLE;
+        if (cur_max < cur_min_locked) cur_max = cur_min_locked;
     }
 
     bool prev_extend = false;
@@ -146,10 +150,10 @@ void run_set_max_angle_mode(Services &svc) {
         bool extend = svc.read_extend_pressed();
         bool retract = svc.read_retract_pressed();
 
-        // RETRACT cycles from ANGLE_STEP up to HIGHEST_ANGLE, then wraps.
+        // RETRACT cycles in [cur_min_locked, HIGHEST_ANGLE], then wraps.
         if (retract && !prev_retract) {
             cur_max += ANGLE_STEP;
-            if (cur_max > HIGHEST_ANGLE) cur_max = ANGLE_STEP;
+            if (cur_max > HIGHEST_ANGLE) cur_max = cur_min_locked;
             render();
         }
 
@@ -159,11 +163,17 @@ void run_set_max_angle_mode(Services &svc) {
                 vTaskDelay(pdMS_TO_TICKS(30));
             }
 
+            uint8_t prev_val = svc.cal_meta->max_angle_deg;
             svc.cal_meta->max_angle_deg = (uint8_t)cur_max;
-            (void)wallter::calibration::save_meta(*svc.cal_meta);
+            esp_err_t serr = wallter::calibration::save_meta(*svc.cal_meta);
 
             char line1[17];
-            snprintf(line1, sizeof(line1), "Max: %d%c saved", cur_max, kDeg);
+            if (serr != ESP_OK) {
+                svc.cal_meta->max_angle_deg = prev_val;
+                snprintf(line1, sizeof(line1), "Save FAIL %d", (int)serr);
+            } else {
+                snprintf(line1, sizeof(line1), "Max: %d%c saved", cur_max, kDeg);
+            }
             svc.display->print(line1, "");
             uint64_t end = svc.now_ms() + 800ULL;
             while (svc.now_ms() < end) {
@@ -185,9 +195,15 @@ void run_set_min_angle_mode(Services &svc) {
     }
 
     // Snap the stored min angle to the nearest valid step; default to LOWEST_ANGLE.
+    // Valid values are any ANGLE_STEP multiple in [LOWEST_ANGLE, current max]
+    // so save_meta() accepts the result (it requires min <= max).
+    int cur_max_locked = (int)svc.cal_meta->max_angle_deg;
+    if (cur_max_locked > HIGHEST_ANGLE) cur_max_locked = HIGHEST_ANGLE;
+    if (cur_max_locked < LOWEST_ANGLE) cur_max_locked = HIGHEST_ANGLE;
     int cur_min = (int)svc.cal_meta->min_angle_deg;
-    if (cur_min < ANGLE_STEP || cur_min > HIGHEST_ANGLE || (cur_min % ANGLE_STEP) != 0) {
+    if (cur_min < LOWEST_ANGLE || cur_min > cur_max_locked || (cur_min % ANGLE_STEP) != 0) {
         cur_min = DEFAULT_CAL_MIN_ANGLE;
+        if (cur_min > cur_max_locked) cur_min = cur_max_locked;
     }
 
     bool prev_extend = false;
@@ -212,10 +228,10 @@ void run_set_min_angle_mode(Services &svc) {
         bool extend = svc.read_extend_pressed();
         bool retract = svc.read_retract_pressed();
 
-        // RETRACT cycles from ANGLE_STEP up to HIGHEST_ANGLE, then wraps.
+        // RETRACT cycles in [LOWEST_ANGLE, cur_max_locked], then wraps.
         if (retract && !prev_retract) {
             cur_min += ANGLE_STEP;
-            if (cur_min > HIGHEST_ANGLE) cur_min = ANGLE_STEP;
+            if (cur_min > cur_max_locked) cur_min = LOWEST_ANGLE;
             render();
         }
 
@@ -225,11 +241,17 @@ void run_set_min_angle_mode(Services &svc) {
                 vTaskDelay(pdMS_TO_TICKS(30));
             }
 
+            uint8_t prev_val = svc.cal_meta->min_angle_deg;
             svc.cal_meta->min_angle_deg = (uint8_t)cur_min;
-            (void)wallter::calibration::save_meta(*svc.cal_meta);
+            esp_err_t serr = wallter::calibration::save_meta(*svc.cal_meta);
 
             char line1[17];
-            snprintf(line1, sizeof(line1), "Min: %d%c saved", cur_min, kDeg);
+            if (serr != ESP_OK) {
+                svc.cal_meta->min_angle_deg = prev_val;
+                snprintf(line1, sizeof(line1), "Save FAIL %d", (int)serr);
+            } else {
+                snprintf(line1, sizeof(line1), "Min: %d%c saved", cur_min, kDeg);
+            }
             svc.display->print(line1, "");
             uint64_t end = svc.now_ms() + 800ULL;
             while (svc.now_ms() < end) {

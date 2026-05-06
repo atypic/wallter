@@ -362,15 +362,36 @@ static void setup() {
             };
         },
         [](const wallter::ble_ota::Settings &s) -> bool {
-            g_cal_meta.min_angle_deg = s.min_angle_deg;
-            g_cal_meta.max_angle_deg = s.max_angle_deg;
-            g_cal_meta.angle_offset_tenths = s.angle_offset_tenths;
-            g_cal_meta.max_extend_speed = s.max_extend_speed;
-            g_cal_meta.max_retract_speed = s.max_retract_speed;
-            g_cal_meta.min_speed = s.min_speed;
+            // Validate angle bounds against the firmware's compile-time range so
+            // save_meta() will accept them. Reject the whole write atomically
+            // (don't mutate live state) if the values are out of range.
+            int min_d = (int)s.min_angle_deg;
+            int max_d = (int)s.max_angle_deg;
+            if (min_d < LOWEST_ANGLE || min_d > HIGHEST_ANGLE ||
+                max_d < LOWEST_ANGLE || max_d > HIGHEST_ANGLE ||
+                (min_d % ANGLE_STEP) != 0 || (max_d % ANGLE_STEP) != 0 ||
+                min_d > max_d) {
+                ESP_LOGW("main", "BLE settings rejected: min=%d max=%d (range [%d..%d] step %d)",
+                         min_d, max_d, LOWEST_ANGLE, HIGHEST_ANGLE, ANGLE_STEP);
+                return false;
+            }
+
+            wallter::calibration::CalMeta proposed = g_cal_meta;
+            proposed.min_angle_deg = (uint8_t)min_d;
+            proposed.max_angle_deg = (uint8_t)max_d;
+            proposed.angle_offset_tenths = s.angle_offset_tenths;
+            proposed.max_extend_speed = s.max_extend_speed;
+            proposed.max_retract_speed = s.max_retract_speed;
+            proposed.min_speed = s.min_speed;
+
+            if (wallter::calibration::save_meta(proposed) != ESP_OK) {
+                return false;
+            }
+
+            g_cal_meta = proposed;
             wallter::accel::set_angle_offset((float)s.angle_offset_tenths * 0.1f);
             wallter::control::update_speeds(s.max_extend_speed, s.max_retract_speed, s.min_speed);
-            return wallter::calibration::save_meta(g_cal_meta) == ESP_OK;
+            return true;
         }
     );
     wallter::ble_ota::set_version_string(VERSION_STRING);
