@@ -174,8 +174,8 @@ fun WallterApp(viewModel: MainViewModel) {
                         settings = ui.deviceSettings,
                         deviceName = ui.deviceName,
                         onRefresh = { viewModel.refreshDeviceSettings() },
-                        onSave = { min, max, offset, extSpd, retSpd ->
-                        viewModel.saveDeviceSettings(min, max, offset, extSpd, retSpd)
+                        onSave = { min, max, offset, extSpd, retSpd, minSpd ->
+                        viewModel.saveDeviceSettings(min, max, offset, extSpd, retSpd, minSpd)
                     },
                         onSaveName = { viewModel.saveDeviceName(it) },
                     )
@@ -400,7 +400,7 @@ private fun DeviceSettingsSection(
     settings: com.wallter.app.ble.WallterBleClient.DeviceSettings?,
     deviceName: String?,
     onRefresh: () -> Unit,
-    onSave: (minAngle: Int, maxAngle: Int, offsetTenths: Int, extendSpeed: Int, retractSpeed: Int) -> Unit,
+    onSave: (minAngle: Int, maxAngle: Int, offsetTenths: Int, extendSpeed: Int, retractSpeed: Int, minSpeed: Int) -> Unit,
     onSaveName: (String) -> Unit,
 ) {
     var minAngle by remember(settings) { mutableStateOf(settings?.minAngleDeg?.toString() ?: "") }
@@ -410,6 +410,7 @@ private fun DeviceSettingsSection(
     }
     var extendSpeed by remember(settings) { mutableStateOf(settings?.maxExtendSpeed?.toString() ?: "0") }
     var retractSpeed by remember(settings) { mutableStateOf(settings?.maxRetractSpeed?.toString() ?: "0") }
+    var minSpeed by remember(settings) { mutableStateOf(settings?.minSpeed?.toString() ?: "0") }
     var nameField by remember(deviceName) { mutableStateOf(deviceName ?: "") }
 
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -457,6 +458,12 @@ private fun DeviceSettingsSection(
                 label = { Text("Max retract speed") },
                 modifier = Modifier.fillMaxWidth(),
             )
+            OutlinedTextField(
+                value = minSpeed,
+                onValueChange = { minSpeed = it },
+                label = { Text("Min speed") },
+                modifier = Modifier.fillMaxWidth(),
+            )
 
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Button(
@@ -466,7 +473,8 @@ private fun DeviceSettingsSection(
                         val ofs = offsetDeg.replace(',', '.').toFloatOrNull() ?: return@Button
                         val ext = extendSpeed.toIntOrNull() ?: return@Button
                         val ret = retractSpeed.toIntOrNull() ?: return@Button
-                        onSave(min, max, (ofs * 10f).toInt(), ext, ret)
+                        val msp = minSpeed.toIntOrNull() ?: return@Button
+                        onSave(min, max, (ofs * 10f).toInt(), ext, ret, msp)
                         if (nameField.isNotBlank() && nameField != deviceName) {
                             onSaveName(nameField)
                         }

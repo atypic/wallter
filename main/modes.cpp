@@ -30,7 +30,7 @@ BootMenuChoice run_boot_menu(Services &svc) {
     bool prev_extend = false;
     bool prev_retract = false;
 
-    static const char *items[] = {"Set max angle", "Set min angle", "Angle offset", "Run self test", "Jog mode", "HAL test", "Reset cal", "Test accel", "Cal accel"};
+    static const char *items[] = {"Set max angle", "Set min angle", "Angle offset", "Run self test", "Jog mode", "HAL test", "Reset cal", "Test accel", "Cal accel", "Set speed"};
     static constexpr int kNumItems = (int)(sizeof(items) / sizeof(items[0]));
 
     svc.display->set_refresh_rate(0.2f);
@@ -78,7 +78,8 @@ BootMenuChoice run_boot_menu(Services &svc) {
             if (sel == 5) return MENU_HAL_TEST;
             if (sel == 6) return MENU_RESET_CAL;
             if (sel == 7) return MENU_TEST_ACCEL;
-            return MENU_CAL_ACCEL;
+            if (sel == 8) return MENU_CAL_ACCEL;
+            return MENU_SET_SPEED;
         }
 
         prev_extend = extend;
@@ -842,6 +843,96 @@ void run_cal_accel_mode(Services &svc) {
         prev_ext = ext;
         prev_ret = ret;
         vTaskDelay(pdMS_TO_TICKS(100));
+    }
+}
+
+void run_set_speed_mode(Services &svc) {
+    if (!svc.cal_meta) {
+        svc.panicf("NO META");
+    }
+
+    // Three settings to cycle through.
+    enum class Field { EXTEND = 0, RETRACT = 1, MIN = 2 };
+    Field field = Field::EXTEND;
+
+    int ext_spd = (int)svc.cal_meta->max_extend_speed;
+    int ret_spd = (int)svc.cal_meta->max_retract_speed;
+    int min_spd = (int)svc.cal_meta->min_speed;
+
+    // Default display values: show compile-time defaults when stored value is 0.
+    auto effective = [](int val, int def) -> int { return (val > 0) ? val : def; };
+
+    svc.display->set_refresh_rate(0.2f);
+
+    while (svc.read_extend_pressed() || svc.read_retract_pressed()) {
+        vTaskDelay(pdMS_TO_TICKS(30));
+    }
+
+    bool prev_ext = false;
+    bool prev_ret = false;
+
+    auto render = [&]() {
+        char line1[17];
+        char line2[17];
+        switch (field) {
+            case Field::EXTEND:
+                snprintf(line1, sizeof(line1), ">Ext max:%d", effective(ext_spd, MASTER_MAX));
+                break;
+            case Field::RETRACT:
+                snprintf(line1, sizeof(line1), ">Ret max:%d", effective(ret_spd, MASTER_MAX));
+                break;
+            case Field::MIN:
+                snprintf(line1, sizeof(line1), ">Min spd:%d", effective(min_spd, MINSPEED));
+                break;
+        }
+        snprintf(line2, sizeof(line2), "R=+5 E=Next/Sav");
+        svc.display->print(line1, line2);
+    };
+    render();
+
+    while (1) {
+        bool ext = svc.read_extend_pressed();
+        bool ret = svc.read_retract_pressed();
+        bool both = ext && ret;
+
+        // Both pressed: save and exit.
+        if (both) {
+            svc.cal_meta->max_extend_speed = (uint8_t)ext_spd;
+            svc.cal_meta->max_retract_speed = (uint8_t)ret_spd;
+            svc.cal_meta->min_speed = (uint8_t)min_spd;
+            (void)wallter::calibration::save_meta(*svc.cal_meta);
+
+            svc.display->print("Speed saved", "");
+            uint64_t end = svc.now_ms() + 800ULL;
+            while (svc.now_ms() < end) {
+                svc.display->refresh();
+                vTaskDelay(pdMS_TO_TICKS(30));
+            }
+            return;
+        }
+
+        // RETRACT: increment current field by 5, wrap at 255 back to 0.
+        if (ret && !prev_ret) {
+            int *cur = nullptr;
+            switch (field) {
+                case Field::EXTEND:  cur = &ext_spd; break;
+                case Field::RETRACT: cur = &ret_spd; break;
+                case Field::MIN:     cur = &min_spd; break;
+            }
+            *cur += 5;
+            if (*cur > 255) *cur = 0;
+            render();
+        }
+
+        // EXTEND: cycle to next field.
+        if (ext && !prev_ext) {
+            field = (Field)(((int)field + 1) % 3);
+            render();
+        }
+
+        prev_ext = ext;
+        prev_ret = ret;
+        vTaskDelay(pdMS_TO_TICKS(60));
     }
 }
 

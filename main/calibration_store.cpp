@@ -82,7 +82,8 @@ struct CalMetaBlobV1 {
     int8_t  angle_offset_tenths;  // 0.1° steps
     uint8_t max_extend_speed;     // 0 = compile-time default
     uint8_t max_retract_speed;    // 0 = compile-time default
-    uint8_t reserved[3];
+    uint8_t min_speed;            // 0 = compile-time default
+    uint8_t reserved[2];
 };
 
 static bool is_valid_angle_setting(int angle_deg) {
@@ -291,6 +292,7 @@ bool load_meta_or_default(CalMeta &out) {
     out.angle_offset_tenths = (int8_t)DEFAULT_ACCEL_ANGLE_OFFSET_TENTHS;
     out.max_extend_speed = 0;   // 0 = use MASTER_MAX
     out.max_retract_speed = 0;
+    out.min_speed = 0;           // 0 = use MINSPEED
 
     nvs_handle_t handle;
     esp_err_t err = nvs_open(kNvsNamespace, NVS_READONLY, &handle);
@@ -326,9 +328,10 @@ bool load_meta_or_default(CalMeta &out) {
                                   : (int8_t)DEFAULT_ACCEL_ANGLE_OFFSET_TENTHS;
     out.max_extend_speed = blob.max_extend_speed;    // 0 = compile-time default
     out.max_retract_speed = blob.max_retract_speed;
-    ESP_LOGI(TAG, "Calibration meta loaded: min=%u max=%u offset=%d tenths ext_spd=%u ret_spd=%u",
+    out.min_speed = blob.min_speed;
+    ESP_LOGI(TAG, "Calibration meta loaded: min=%u max=%u offset=%d tenths ext_spd=%u ret_spd=%u min_spd=%u",
              (unsigned)out.min_angle_deg, (unsigned)out.max_angle_deg, (int)out.angle_offset_tenths,
-             (unsigned)out.max_extend_speed, (unsigned)out.max_retract_speed);
+             (unsigned)out.max_extend_speed, (unsigned)out.max_retract_speed, (unsigned)out.min_speed);
     return true;
 }
 
@@ -347,6 +350,7 @@ esp_err_t save_meta(const CalMeta &meta) {
     blob.angle_offset_tenths = meta.angle_offset_tenths;
     blob.max_extend_speed = meta.max_extend_speed;
     blob.max_retract_speed = meta.max_retract_speed;
+    blob.min_speed = meta.min_speed;
 
     nvs_handle_t handle;
     esp_err_t err = nvs_open(kNvsNamespace, NVS_READWRITE, &handle);

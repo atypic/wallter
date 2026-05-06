@@ -32,6 +32,7 @@ struct CalMeta {
 	int8_t  angle_offset_tenths;  // offset in 0.1° steps, added to raw accel angle
 	uint8_t max_extend_speed;     // 0 = use compile-time MASTER_MAX
 	uint8_t max_retract_speed;    // 0 = use compile-time MASTER_MAX
+	uint8_t min_speed;            // 0 = use compile-time MINSPEED
 };
 
 // Loads min/max angles from NVS if present; otherwise returns defaults.

@@ -243,6 +243,7 @@ class WallterBleClient(private val context: Context) {
         val angleOffsetTenths: Int,
         val maxExtendSpeed: Int,
         val maxRetractSpeed: Int,
+        val minSpeed: Int,
     )
 
     suspend fun readSettings(): DeviceSettings? {
@@ -255,6 +256,7 @@ class WallterBleClient(private val context: Context) {
             angleOffsetTenths = bytes[2].toInt(),  // signed
             maxExtendSpeed = if (bytes.size >= 5) bytes[3].toInt() and 0xFF else 0,
             maxRetractSpeed = if (bytes.size >= 5) bytes[4].toInt() and 0xFF else 0,
+            minSpeed = if (bytes.size >= 6) bytes[5].toInt() and 0xFF else 0,
         )
     }
 
@@ -266,6 +268,7 @@ class WallterBleClient(private val context: Context) {
             s.angleOffsetTenths.toByte(),
             s.maxExtendSpeed.toByte(),
             s.maxRetractSpeed.toByte(),
+            s.minSpeed.toByte(),
         )
         writeCharacteristic(chr, payload)
     }

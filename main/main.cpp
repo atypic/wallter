@@ -191,6 +191,8 @@ extern "C" void app_main(void) {
                 wallter::modes::run_test_accel_mode(svc);
             } else if (choice == wallter::modes::MENU_CAL_ACCEL) {
                 wallter::modes::run_cal_accel_mode(svc);
+            } else if (choice == wallter::modes::MENU_SET_SPEED) {
+                wallter::modes::run_set_speed_mode(svc);
             } else {
                 display.print("Jog mode", "Starting...");
                 wallter::modes::run_jog_mode(svc);
@@ -199,6 +201,7 @@ extern "C" void app_main(void) {
             // Re-load calibration after each menu action.
             load_calibration_all();
             wallter::control::update_limits(g_min_target_idx, g_max_target_idx);
+            wallter::control::update_speeds(g_cal_meta.max_extend_speed, g_cal_meta.max_retract_speed, g_cal_meta.min_speed);
             wallter::inputs::clear_button_events();
         }
 
@@ -319,6 +322,7 @@ static void setup() {
     ctx.max_target_idx = g_max_target_idx;
     ctx.max_extend_speed = g_cal_meta.max_extend_speed;
     ctx.max_retract_speed = g_cal_meta.max_retract_speed;
+    ctx.min_speed = g_cal_meta.min_speed;
     wallter::control::init(ctx);
 
     // Reset counters and positions like Arduino setup().
@@ -358,6 +362,7 @@ static void setup() {
                 .angle_offset_tenths = g_cal_meta.angle_offset_tenths,
                 .max_extend_speed = g_cal_meta.max_extend_speed ? g_cal_meta.max_extend_speed : (uint8_t)MASTER_MAX,
                 .max_retract_speed = g_cal_meta.max_retract_speed ? g_cal_meta.max_retract_speed : (uint8_t)MASTER_MAX,
+                .min_speed = g_cal_meta.min_speed ? g_cal_meta.min_speed : (uint8_t)MINSPEED,
             };
         },
         [](const wallter::ble_ota::Settings &s) -> bool {
@@ -366,8 +371,9 @@ static void setup() {
             g_cal_meta.angle_offset_tenths = s.angle_offset_tenths;
             g_cal_meta.max_extend_speed = s.max_extend_speed;
             g_cal_meta.max_retract_speed = s.max_retract_speed;
+            g_cal_meta.min_speed = s.min_speed;
             wallter::accel::set_angle_offset((float)s.angle_offset_tenths * 0.1f);
-            wallter::control::update_speeds(s.max_extend_speed, s.max_retract_speed);
+            wallter::control::update_speeds(s.max_extend_speed, s.max_retract_speed, s.min_speed);
             return wallter::calibration::save_meta(g_cal_meta) == ESP_OK;
         }
     );

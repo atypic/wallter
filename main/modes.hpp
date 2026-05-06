@@ -19,6 +19,7 @@ enum BootMenuChoice {
     MENU_RESET_CAL = 6,
     MENU_TEST_ACCEL = 7,
     MENU_CAL_ACCEL = 8,
+    MENU_SET_SPEED = 9,
 };
 
 struct Services {
@@ -60,5 +61,6 @@ void run_reset_calibration_data(Services &svc);
 void run_jog_mode(Services &svc);
 void run_test_accel_mode(Services &svc);
 void run_cal_accel_mode(Services &svc);
+void run_set_speed_mode(Services &svc);
 
 } // namespace wallter::modes
