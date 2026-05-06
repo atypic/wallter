@@ -208,14 +208,9 @@ extern "C" void app_main(void) {
         wallter::inputs::clear_boot_menu_requested();
         wallter::inputs::clear_skip_self_test_requested();
     } else {
-        if (skip_self_test) {
-            ESP_LOGI(TAG, "Normal boot: skipping self-test (both buttons held)");
-        } else {
-            ESP_LOGI(TAG, "Normal boot: running self-test");
-            wallter::modes::run_self_test_sequence(svc);
-            // Self-test drives motors directly, but encoder ISRs still maintain MotorDriver
-            // position. Homing should establish the reference; do not zero positions here.
-        }
+        // v2.0.7: self-test removed in favor of direct drive. Always skip.
+        ESP_LOGI(TAG, "Normal boot: self-test disabled (direct-drive build)");
+        (void)skip_self_test;
 
         wallter::inputs::clear_button_events();
         wallter::inputs::clear_skip_self_test_requested();
@@ -279,7 +274,8 @@ extern "C" void app_main(void) {
                 display.update_target_view(tgt_angle, pct);
             }
             wallter::ble_ota::set_current_angle_deg(cur_angle);
-            wallter::control::error_check_motor_positions();
+            // v2.0.7: stall/error checks disabled in direct-drive build.
+            // wallter::control::error_check_motor_positions();
         }
         prev_cmd = cur_cmd;
         display.refresh();

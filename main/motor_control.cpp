@@ -260,36 +260,17 @@ void set_command(int cmd) {
 static int32_t get_master_motor_speed() {
     float target_deg = g_ctx.target_angles[*g_ctx.target_idx];
 
-    // Choose max speed based on current direction.
-    // Subtract 3 from configured speeds to give followers headroom.
-    uint32_t max_speed = (uint32_t)MASTER_MAX;
+    // v2.0.7: direct-drive. Use the configured max speed verbatim — no
+    // acceleration ramp, no follower headroom subtraction.
+    uint32_t max_speed = (uint32_t)MAXSPEED;
     if (g_current_cmd == wallter::CMD_EXTEND) {
-        if (g_ctx.max_extend_speed > 3) max_speed = (uint32_t)(g_ctx.max_extend_speed - 3);
+        if (g_ctx.max_extend_speed > 0) max_speed = (uint32_t)g_ctx.max_extend_speed;
     } else if (g_current_cmd == wallter::CMD_RETRACT || g_current_cmd == wallter::CMD_HOME) {
-        if (g_ctx.max_retract_speed > 3) max_speed = (uint32_t)(g_ctx.max_retract_speed - 3);
+        if (g_ctx.max_retract_speed > 0) max_speed = (uint32_t)g_ctx.max_retract_speed;
     }
 
-    uint32_t min_speed = (g_ctx.min_speed > 0) ? (uint32_t)g_ctx.min_speed : (uint32_t)MINSPEED;
-    uint32_t return_speed = (uint32_t)abs(g_ctx.motors[g_ctx.master_motor_index].getSpeed());
-    if ((return_speed < min_speed) && (g_current_cmd != wallter::CMD_STOP)) {
-        g_accel_phase = true;
-    }
-
-    if (g_accel_phase) {
-        uint64_t n = now_ms();
-        if ((n - g_delta_acc_ms) > 50ULL) {
-            if (return_speed == 0) {
-                return_speed = min_speed;
-            }
-            return_speed += ACCEL_STEP;
-            if (return_speed >= max_speed) {
-                return_speed = max_speed;
-                g_accel_phase = false;
-                g_delta_acc_ms = 0;
-            }
-            g_delta_acc_ms = n;
-        }
-    }
+    g_accel_phase = false;
+    uint32_t return_speed = (g_current_cmd == wallter::CMD_STOP) ? 0U : max_speed;
 
     bool target_reached = false;
     float current_deg = wallter::accel::read_angle_deg();
@@ -406,47 +387,21 @@ void iterate() {
         }
     }
 
+    // Compute master speed (handles target detection + STOP transitions).
+    int32_t master_speed = get_master_motor_speed();
+    g_ctx.motors[g_ctx.master_motor_index].setSpeed(master_speed);
+
     for (int m = 0; m < g_ctx.num_motors; ++m) {
         if (m == g_ctx.master_motor_index) {
-            int new_speed = get_master_motor_speed();
-            g_ctx.motors[g_ctx.master_motor_index].setSpeed(new_speed);
             continue;
         }
-
-        // Safety: don't let followers move unless the master has shown real motion
-        // (encoder edges) since this command started.
-        if (g_current_cmd != wallter::CMD_STOP && !g_master_moved_since_cmd && abs(g_ctx.motors[g_ctx.master_motor_index].getSpeed()) > 0) {
+        // v2.0.7: direct-drive. All motors run at the master's commanded speed.
+        // No PID follow, no master-motion safety gate.
+        if (g_current_cmd == wallter::CMD_STOP) {
             g_ctx.motors[m].setSpeed(0);
             g_ctx.motors[m].pidReset();
-            continue;
-        }
-
-        switch (g_current_cmd) {
-            case wallter::CMD_STOP:
-                g_ctx.motors[m].setSpeed(0);
-                g_ctx.motors[m].pidReset();
-                break;
-            case wallter::CMD_EXTEND: {
-                int32_t spd = g_ctx.motors[m].computeFollow(false,
-                                                           g_accel_phase,
-                                                           abs(g_ctx.motors[g_ctx.master_motor_index].getSpeed()),
-                                                           g_ctx.motors[g_ctx.master_motor_index]);
-                g_ctx.motors[m].setSpeed(spd);
-                break;
-            }
-            case wallter::CMD_RETRACT:
-            case wallter::CMD_HOME: {
-                bool reverse = (g_current_cmd == wallter::CMD_RETRACT) || (g_current_cmd == wallter::CMD_HOME);
-                int32_t spd = g_ctx.motors[m].computeFollow(reverse,
-                                                           g_accel_phase,
-                                                           abs(g_ctx.motors[g_ctx.master_motor_index].getSpeed()),
-                                                           g_ctx.motors[g_ctx.master_motor_index]);
-                g_ctx.motors[m].setSpeed(spd);
-                break;
-            }
-            default:
-                ESP_LOGE(TAG, "Invalid command.");
-                panicf("BAD CMD");
+        } else {
+            g_ctx.motors[m].setSpeed(master_speed);
         }
     }
 }

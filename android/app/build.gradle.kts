@@ -17,8 +17,8 @@ android {
         applicationId = "com.wallter.app"
         minSdk = 31
         targetSdk = 36
-        versionCode = 2
-        versionName = "2.0.6"
+        versionCode = 3
+        versionName = "2.0.7"
 
         buildConfigField("String", "GITHUB_OWNER", "\"atypic\"")
         buildConfigField("String", "GITHUB_REPO", "\"wallter\"")
