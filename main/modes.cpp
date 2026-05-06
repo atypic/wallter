@@ -860,7 +860,12 @@ void run_set_speed_mode(Services &svc) {
     int min_spd = (int)svc.cal_meta->min_speed;
 
     // Default display values: show compile-time defaults when stored value is 0.
-    auto effective = [](int val, int def) -> int { return (val > 0) ? val : def; };
+    auto effective = [](int val, int def) -> int {
+        int v = (val > 0) ? val : def;
+        if (v < 0) v = 0;
+        if (v > 999) v = 999;
+        return v;
+    };
 
     svc.display->set_refresh_rate(0.2f);
 
@@ -876,13 +881,13 @@ void run_set_speed_mode(Services &svc) {
         char line2[17];
         switch (field) {
             case Field::EXTEND:
-                snprintf(line1, sizeof(line1), ">Ext max:%d", effective(ext_spd, MASTER_MAX));
+                snprintf(line1, sizeof(line1), ">Ext max:%u", (unsigned)(uint8_t)effective(ext_spd, MASTER_MAX));
                 break;
             case Field::RETRACT:
-                snprintf(line1, sizeof(line1), ">Ret max:%d", effective(ret_spd, MASTER_MAX));
+                snprintf(line1, sizeof(line1), ">Ret max:%u", (unsigned)(uint8_t)effective(ret_spd, MASTER_MAX));
                 break;
             case Field::MIN:
-                snprintf(line1, sizeof(line1), ">Min spd:%d", effective(min_spd, MINSPEED));
+                snprintf(line1, sizeof(line1), ">Min spd:%u", (unsigned)(uint8_t)effective(min_spd, MINSPEED));
                 break;
         }
         snprintf(line2, sizeof(line2), "R=+5 E=Next/Sav");
