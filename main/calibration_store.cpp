@@ -87,11 +87,13 @@ struct CalMetaBlobV1 {
 };
 
 static bool is_valid_angle_setting(int angle_deg) {
-    if (angle_deg < LOWEST_ANGLE || angle_deg > HIGHEST_ANGLE) {
+    // User may configure any step-aligned angle in [0..HIGHEST_ANGLE].
+    // The runtime target table clamps min up to a safe minimum (>= ANGLE_STEP)
+    // so 0 stored is safe; storing 0 just means "as low as the table allows".
+    if (angle_deg < 0 || angle_deg > HIGHEST_ANGLE) {
         return false;
     }
-    int delta = angle_deg - LOWEST_ANGLE;
-    if ((delta % ANGLE_STEP) != 0) {
+    if ((angle_deg % ANGLE_STEP) != 0) {
         return false;
     }
     return true;

@@ -363,16 +363,18 @@ static void setup() {
         },
         [](const wallter::ble_ota::Settings &s) -> bool {
             // Validate angle bounds against the firmware's compile-time range so
-            // save_meta() will accept them. Reject the whole write atomically
-            // (don't mutate live state) if the values are out of range.
+            // save_meta() will accept them. min may go down to 0 (the runtime
+            // target table will clamp it to a safe minimum); max must be >=
+            // ANGLE_STEP so there's at least one target. Reject the whole
+            // write atomically (don't mutate live state) if values are bad.
             int min_d = (int)s.min_angle_deg;
             int max_d = (int)s.max_angle_deg;
-            if (min_d < LOWEST_ANGLE || min_d > HIGHEST_ANGLE ||
-                max_d < LOWEST_ANGLE || max_d > HIGHEST_ANGLE ||
+            if (min_d < 0 || min_d > HIGHEST_ANGLE ||
+                max_d < ANGLE_STEP || max_d > HIGHEST_ANGLE ||
                 (min_d % ANGLE_STEP) != 0 || (max_d % ANGLE_STEP) != 0 ||
                 min_d > max_d) {
-                ESP_LOGW("main", "BLE settings rejected: min=%d max=%d (range [%d..%d] step %d)",
-                         min_d, max_d, LOWEST_ANGLE, HIGHEST_ANGLE, ANGLE_STEP);
+                ESP_LOGW("main", "BLE settings rejected: min=%d max=%d (range [0..%d] step %d)",
+                         min_d, max_d, HIGHEST_ANGLE, ANGLE_STEP);
                 return false;
             }
 

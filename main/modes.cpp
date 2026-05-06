@@ -195,13 +195,13 @@ void run_set_min_angle_mode(Services &svc) {
     }
 
     // Snap the stored min angle to the nearest valid step; default to LOWEST_ANGLE.
-    // Valid values are any ANGLE_STEP multiple in [LOWEST_ANGLE, current max]
-    // so save_meta() accepts the result (it requires min <= max).
+    // Valid values: any ANGLE_STEP multiple in [0, current max] (user may go below
+    // LOWEST_ANGLE; the runtime target table will clamp it to a safe minimum).
     int cur_max_locked = (int)svc.cal_meta->max_angle_deg;
     if (cur_max_locked > HIGHEST_ANGLE) cur_max_locked = HIGHEST_ANGLE;
-    if (cur_max_locked < LOWEST_ANGLE) cur_max_locked = HIGHEST_ANGLE;
+    if (cur_max_locked < ANGLE_STEP) cur_max_locked = HIGHEST_ANGLE;
     int cur_min = (int)svc.cal_meta->min_angle_deg;
-    if (cur_min < LOWEST_ANGLE || cur_min > cur_max_locked || (cur_min % ANGLE_STEP) != 0) {
+    if (cur_min < 0 || cur_min > cur_max_locked || (cur_min % ANGLE_STEP) != 0) {
         cur_min = DEFAULT_CAL_MIN_ANGLE;
         if (cur_min > cur_max_locked) cur_min = cur_max_locked;
     }
@@ -228,10 +228,10 @@ void run_set_min_angle_mode(Services &svc) {
         bool extend = svc.read_extend_pressed();
         bool retract = svc.read_retract_pressed();
 
-        // RETRACT cycles in [LOWEST_ANGLE, cur_max_locked], then wraps.
+        // RETRACT cycles in [0, cur_max_locked], then wraps.
         if (retract && !prev_retract) {
             cur_min += ANGLE_STEP;
-            if (cur_min > cur_max_locked) cur_min = LOWEST_ANGLE;
+            if (cur_min > cur_max_locked) cur_min = 0;
             render();
         }
 
