@@ -37,13 +37,9 @@ static volatile bool g_retract_event = false;
 static bool g_boot_menu_requested = false;
 static bool g_boot_skip_self_test_requested = false;
 
-// Arduino-style hall tick filter (ms gate).
-// We keep the knob in one place by deriving from HAL_CLK_MIN_PULSE_US.
-// NOTE: With PCNT we don't do a software min-gap gate here; the peripheral counts
-// pulses directly and samples the direction control at the pulse edge.
-
 static pcnt_unit_handle_t g_pcnt_units[NUM_MOTORS] = {nullptr};
 static pcnt_channel_handle_t g_pcnt_channels[NUM_MOTORS] = {nullptr};
+static pcnt_channel_handle_t g_pcnt_channels_b[NUM_MOTORS] = {nullptr};
 static int32_t g_pcnt_last_count[NUM_MOTORS] = {0};
 
 static void IRAM_ATTR isr_button_extend(void *arg) {
@@ -59,8 +55,7 @@ static void IRAM_ATTR isr_button_retract(void *arg) {
 static void configure_hal_pcnt() {
 #if SOC_PCNT_SUPPORTED
     // Create one PCNT unit per motor.
-    // HAL_CLK is the pulse input (we count rising edges only).
-    // HAL_CNT is the level input (direction control sampled at the pulse edge).
+    // Quadrature encoder, full 4x decode: A=HAL_CLK, B=HAL_CNT.
     for (int i = 0; i < g_num_motors; ++i) {
         if (g_pcnt_units[i]) {
             continue;
@@ -79,23 +74,31 @@ static void configure_hal_pcnt() {
     ESP_ERROR_CHECK(pcnt_unit_add_watch_point(g_pcnt_units[i], unit_cfg.low_limit));
     ESP_ERROR_CHECK(pcnt_unit_add_watch_point(g_pcnt_units[i], unit_cfg.high_limit));
 
-        pcnt_chan_config_t chan_cfg = {};
-        chan_cfg.edge_gpio_num = (gpio_num_t)HAL_CLK[i];
-        chan_cfg.level_gpio_num = (gpio_num_t)HAL_CNT[i];
-        ESP_ERROR_CHECK(pcnt_new_channel(g_pcnt_units[i], &chan_cfg, &g_pcnt_channels[i]));
-
-        // Count on rising edge only.
+        // Full 4x quadrature: two channels per unit, both edges of A and B.
+        // Dither at rest self-cancels (+1,-1,...) instead of accumulating, and
+        // direction comes from phase rather than a level sampled at one edge.
+        // Polarity preserved: extension -> count up -> stepsOut.
+        pcnt_chan_config_t chan_a_cfg = {};
+        chan_a_cfg.edge_gpio_num = (gpio_num_t)HAL_CLK[i];   // A
+        chan_a_cfg.level_gpio_num = (gpio_num_t)HAL_CNT[i];  // B
+        ESP_ERROR_CHECK(pcnt_new_channel(g_pcnt_units[i], &chan_a_cfg, &g_pcnt_channels[i]));
         ESP_ERROR_CHECK(pcnt_channel_set_edge_action(g_pcnt_channels[i],
                                                      PCNT_CHANNEL_EDGE_ACTION_INCREASE,
-                                                     PCNT_CHANNEL_EDGE_ACTION_HOLD));
-
-        // Map HAL_CNT to direction:
-        // - HAL_CNT==0 -> step IN  (position--)
-        // - HAL_CNT==1 -> step OUT (position++)
-        // Base edge action is INCREASE; invert it when HAL_CNT is low.
+                                                     PCNT_CHANNEL_EDGE_ACTION_DECREASE));
         ESP_ERROR_CHECK(pcnt_channel_set_level_action(g_pcnt_channels[i],
                                                       PCNT_CHANNEL_LEVEL_ACTION_INVERSE,
                                                       PCNT_CHANNEL_LEVEL_ACTION_KEEP));
+
+        pcnt_chan_config_t chan_b_cfg = {};
+        chan_b_cfg.edge_gpio_num = (gpio_num_t)HAL_CNT[i];   // B
+        chan_b_cfg.level_gpio_num = (gpio_num_t)HAL_CLK[i];  // A
+        ESP_ERROR_CHECK(pcnt_new_channel(g_pcnt_units[i], &chan_b_cfg, &g_pcnt_channels_b[i]));
+        ESP_ERROR_CHECK(pcnt_channel_set_edge_action(g_pcnt_channels_b[i],
+                                                     PCNT_CHANNEL_EDGE_ACTION_INCREASE,
+                                                     PCNT_CHANNEL_EDGE_ACTION_DECREASE));
+        ESP_ERROR_CHECK(pcnt_channel_set_level_action(g_pcnt_channels_b[i],
+                                                      PCNT_CHANNEL_LEVEL_ACTION_KEEP,
+                                                      PCNT_CHANNEL_LEVEL_ACTION_INVERSE));
 
         // Optional glitch filter: keep conservative (short spikes only).
         // If you want stronger filtering, tune this value.
@@ -134,7 +137,7 @@ static void configure_buttons_gpio() {
     gpio_new_pin_glitch_filter(&bcfg, &g_btn_retract_filter);
 }
 
-static void configure_hal_encoder_gpio_and_isrs() {
+static void configure_hal_encoder() {
     gpio_config_t clk = {};
     clk.mode = GPIO_MODE_INPUT;
     clk.intr_type = GPIO_INTR_DISABLE;
@@ -289,7 +292,7 @@ void init(MotorDriver *motors, int num_motors) {
     // In simulation mode we do not attach encoder GPIO ISRs.
     start_hal_sim_timer();
 #else
-    configure_hal_encoder_gpio_and_isrs();
+    configure_hal_encoder();
 #endif
 
     if (g_btn_extend_filter) {

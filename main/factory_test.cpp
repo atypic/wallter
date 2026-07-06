@@ -298,15 +298,15 @@ static void set_all_pwm_off() {
 
 static void set_all_dir_safe() {
     for (int i = 0; i < NUM_MOTORS; ++i) {
-        gpio_set_level(static_cast<gpio_num_t>(HAL_DIR[i]), DIR_LEVEL_EXTEND);
+        gpio_set_level(static_cast<gpio_num_t>(MOTOR_DIR_PIN[i]), DIR_LEVEL_EXTEND);
     }
 }
 
 
 static void step_output_multimeter(int motor_index, int pwm_channel) {
     int label = motor_index + 1;
-    gpio_num_t dir_pin = static_cast<gpio_num_t>(HAL_DIR[motor_index]);
-    gpio_num_t pwm_pin = static_cast<gpio_num_t>(HAL_PWM[motor_index]);
+    gpio_num_t dir_pin = static_cast<gpio_num_t>(MOTOR_DIR_PIN[motor_index]);
+    gpio_num_t pwm_pin = static_cast<gpio_num_t>(MOTOR_PWM_PIN[motor_index]);
 
     ESP_LOGI(TAG, "=== STEP: Motor %d output (measure PWM%d/DIR%d) ===", label, label, label);
     ESP_LOGI(TAG, "Probe pins: PWM GPIO%d, DIR GPIO%d", (int)pwm_pin, (int)dir_pin);
@@ -402,8 +402,8 @@ static void step_output_multimeter(int motor_index, int pwm_channel) {
     for (int i = 0; i < NUM_MOTORS; ++i) {
         ESP_LOGI(TAG, "Motor %d mapping: PWM=GPIO%d DIR=GPIO%d HAL_CLK=GPIO%d HAL_CNT=GPIO%d",
                  i,
-                 (int)HAL_PWM[i],
-                 (int)HAL_DIR[i],
+                 (int)MOTOR_PWM_PIN[i],
+                 (int)MOTOR_DIR_PIN[i],
                  (int)HAL_CLK[i],
                  (int)HAL_CNT[i]);
     }
@@ -430,15 +430,15 @@ static void step_output_multimeter(int motor_index, int pwm_channel) {
 
     // Configure DIR pins as outputs.
     for (int i = 0; i < NUM_MOTORS; ++i) {
-        ESP_ERROR_CHECK(configure_gpio_output(static_cast<gpio_num_t>(HAL_DIR[i])));
-        set_dir(static_cast<gpio_num_t>(HAL_DIR[i]), 0);
+        ESP_ERROR_CHECK(configure_gpio_output(static_cast<gpio_num_t>(MOTOR_DIR_PIN[i])));
+        set_dir(static_cast<gpio_num_t>(MOTOR_DIR_PIN[i]), 0);
     }
 
     // LEDC setup for PWM
     ESP_ERROR_CHECK(ledc_init_timer());
     for (int i = 0; i < NUM_MOTORS; ++i) {
         // LEDC has 8 channels per speed mode; keep factory test simple.
-        ESP_ERROR_CHECK(ledc_init_channel(i, static_cast<gpio_num_t>(HAL_PWM[i])));
+        ESP_ERROR_CHECK(ledc_init_channel(i, static_cast<gpio_num_t>(MOTOR_PWM_PIN[i])));
         ledc_set_duty_u8(i, 0);
     }
 

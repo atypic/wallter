@@ -387,8 +387,8 @@ void run_self_test_sequence(Services &svc) {
              (unsigned long)svc.motors[1].getStepsOut());
 
     // Stop + settle before resetting counters and reversing direction.
-    // With HAL_VALIDATE_DIR_WITH_MOTOR enabled, immediate reversals can drop
-    // ticks while the mechanism is still moving in the previous direction.
+    // Immediate reversals can drop ticks while the mechanism is still moving
+    // in the previous direction.
     for (int i = 0; i < svc.num_motors; i++) svc.motors[i].setSpeed(0);
     wait_with_encoder_poll((uint32_t)settle_time);
 

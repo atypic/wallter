@@ -14,7 +14,7 @@
 #define BOARD_TYPE_SLUPPEN_PROTO 4
 
 // Unified firmware version — update on each release.
-#define FW_VERSION "2.1.0"
+#define FW_VERSION "2.1.1"
 
 // Select board via unified BOARD_TYPE macro (see boards.h for constants)
 // #define BOARD_TYPE BOARD_TYPE_LEANGEN_4_MOTOR
@@ -57,9 +57,6 @@ unsigned int HAL_CLK[NUM_MOTORS] = {23, 25, 27, 29};
 #define DEFAULT_CAL_MIN_ANGLE LOWEST_ANGLE
 #define DEFAULT_CAL_MAX_ANGLE HIGHEST_ANGLE
 #define DEFAULT_ACCEL_ANGLE_OFFSET_TENTHS 0
-#define HAL_DIR_FROM_MOTOR 0
-#define HAL_VALIDATE_DIR_WITH_MOTOR 0
-#define HAL_CLK_MIN_PULSE_US 0
 
 // Motor output inversion.
 #define MOTOR_OUTPUT_INVERT 0
@@ -108,9 +105,6 @@ unsigned int HAL_CLK[NUM_MOTORS] = {28, 29};  // white wires
 #define DEFAULT_CAL_MIN_ANGLE LOWEST_ANGLE
 #define DEFAULT_CAL_MAX_ANGLE HIGHEST_ANGLE
 #define DEFAULT_ACCEL_ANGLE_OFFSET_TENTHS 0
-#define HAL_DIR_FROM_MOTOR 0
-#define HAL_VALIDATE_DIR_WITH_MOTOR 0
-#define HAL_CLK_MIN_PULSE_US 0
 
 // Motor output inversion.
 #define MOTOR_OUTPUT_INVERT 0
@@ -160,28 +154,15 @@ static const bool g_has_keypad = false;
 static const unsigned int HAL_CLK[NUM_MOTORS] = {11, 2};
 static const unsigned int HAL_CNT[NUM_MOTORS] = {13, 1};
 
-// Encoder interpretation / filtering.
-// If HAL_CNT (direction) is floating/miswired, the direction bit will look random
-// and you'll accumulate both stepsIn and stepsOut during a single move.
-// Set this to 1 to derive direction from the commanded motor direction instead.
-#define HAL_DIR_FROM_MOTOR 1
-
-// Optional: reject encoder edges whose sensed direction disagrees with the
-// commanded motor direction. Helps when HAL_CNT is noisy.
-#define HAL_VALIDATE_DIR_WITH_MOTOR 0
-
-// Minimum accepted gap between HAL_CLK edges (microseconds).
-#define HAL_CLK_MIN_PULSE_US 4000
-
 // Button pins (swapped on hardware: EXTEND/RETRACT are flipped)
 #define BUTTON_EXTEND_PIN 47
 #define BUTTON_RETRACT_PIN 21
 
-// Motor driver pins (PWM/DIR)
+// Motor driver pins (PWM/DIR into Cytron)
 // Motor 0: PWM=GPIO16, DIR=GPIO17
 // Motor 1: PWM=GPIO18, DIR=GPIO8
-static const unsigned int HAL_PWM[NUM_MOTORS] = {16, 18};
-static const unsigned int HAL_DIR[NUM_MOTORS] = {17, 8};
+static const unsigned int MOTOR_PWM_PIN[NUM_MOTORS] = {16, 18};
+static const unsigned int MOTOR_DIR_PIN[NUM_MOTORS] = {17, 8};
 
 // Motor output inversion.
 // If homing drives the wrong physical direction, set this to 1.
@@ -236,9 +217,6 @@ unsigned int HAL_CLK[NUM_MOTORS] = {29, 27, 25, 23};
 #define DEFAULT_CAL_MIN_ANGLE LOWEST_ANGLE
 #define DEFAULT_CAL_MAX_ANGLE HIGHEST_ANGLE
 #define DEFAULT_ACCEL_ANGLE_OFFSET_TENTHS 0
-#define HAL_DIR_FROM_MOTOR 0
-#define HAL_VALIDATE_DIR_WITH_MOTOR 0
-#define HAL_CLK_MIN_PULSE_US 0
 
 // Motor output inversion.
 #define MOTOR_OUTPUT_INVERT 0
