@@ -327,12 +327,7 @@ static int32_t get_master_motor_speed() {
 
 void iterate() {
     // Update accelerometer filter once per iteration before any angle reads.
-    {
-        float hint = 0.0f;
-        if (g_current_cmd == wallter::CMD_EXTEND) hint = +1.0f;
-        else if (g_current_cmd == wallter::CMD_RETRACT || g_current_cmd == wallter::CMD_HOME) hint = -1.0f;
-        wallter::accel::update(hint);
-    }
+    wallter::accel::update();
 
     // Pull PCNT hardware counts into MotorDriver step/position counters.
     wallter::inputs::poll_encoder_counts();

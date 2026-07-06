@@ -30,10 +30,22 @@ static int16_t g_last_ay = 0;
 static int16_t g_last_az = 0;
 static float g_angle_offset = 0.0f;
 
-// EMA smoothing weight. Lower values = heavier smoothing. At ~5 Hz update rate
-// 0.15 gives a ~1.3 s time constant, enough to reject single-sample noise spikes
-// while still tracking the slow mechanical movement.
-static constexpr float kAlpha = 0.15f;
+// Final EMA smoothing weight. Lower = heavier smoothing / more lag.
+static constexpr float kAlpha = 0.2f;
+
+// Median pre-filter window. Odd size; rejects isolated impulsive spikes
+// (e.g. vibration transients) that an EMA would smear instead of remove.
+static constexpr int kMedianN = 5;
+static float g_med_win[kMedianN] = {0};
+static int g_med_count = 0;
+static int g_med_idx = 0;
+
+// ±4g range, 12-bit signed (±2048 LSB) -> 512 LSB per g.
+static constexpr float kLsbPerG = 512.0f;
+// Reject samples whose acceleration magnitude deviates from 1g by more than
+// this fraction: they are contaminated by linear acceleration (vibration,
+// impact) and do not represent pure tilt.
+static constexpr float kGateFrac = 0.25f;
 
 static esp_err_t write_reg(uint8_t reg, uint8_t val) {
     i2c_cmd_handle_t cmd = i2c_cmd_link_create();
@@ -104,73 +116,87 @@ esp_err_t init() {
     if (err != ESP_OK) return err;
     vTaskDelay(pdMS_TO_TICKS(2));   // mode transition <1.5 ms
 
-    // ACC_CONFIG1: acc_range=±4g, osr=0, acc_odr=100 Hz
-    // bits[7:6]=01(±4g) bits[5:4]=00(osr=0) bits[3:0]=1000(100Hz) → 0x48
-    err = write_reg(REG_ACC_CONFIG1, 0x48);
+    // ACC_CONFIG1: acc_range=±4g, osr=3 (max hardware oversampling), acc_odr=100 Hz
+    // bits[7:6]=01(±4g) bits[5:4]=11(osr=3) bits[3:0]=1000(100Hz) → 0x78
+    err = write_reg(REG_ACC_CONFIG1, 0x78);
     if (err != ESP_OK) return err;
     vTaskDelay(pdMS_TO_TICKS(20));  // wait 2/ODR = 20 ms for filter to settle
 
     g_initialized = true;
-    ESP_LOGI(TAG, "BMA400 initialized: 100 Hz, ±4 g");
+    ESP_LOGI(TAG, "BMA400 initialized: 100 Hz, ±4 g, OSR3");
     return ESP_OK;
 }
 
-static float read_raw_angle() {
+static bool read_accel(int16_t &ax, int16_t &ay, int16_t &az) {
     // 6 bytes: X_LSB, X_MSB, Y_LSB, Y_MSB, Z_LSB, Z_MSB
     uint8_t raw[6] = {};
     if (read_regs(REG_ACC_DATA_0, raw, 6) != ESP_OK) {
         ESP_LOGW(TAG, "ACC_DATA read failed");
-        return g_filtered_angle;
+        return false;
     }
-
     // Each axis: 12-bit 2's-complement, right-aligned in [MSB[3:0] | LSB[7:0]]
-    int16_t ay = (int16_t)(((uint16_t)(raw[3] & 0x0F) << 8) | raw[2]);
-    int16_t az = (int16_t)(((uint16_t)(raw[5] & 0x0F) << 8) | raw[4]);
+    ax = (int16_t)(((uint16_t)(raw[1] & 0x0F) << 8) | raw[0]);
+    ay = (int16_t)(((uint16_t)(raw[3] & 0x0F) << 8) | raw[2]);
+    az = (int16_t)(((uint16_t)(raw[5] & 0x0F) << 8) | raw[4]);
+    if (ax & 0x0800) ax |= (int16_t)0xF000;
     if (ay & 0x0800) ay |= (int16_t)0xF000;
     if (az & 0x0800) az |= (int16_t)0xF000;
+    return true;
+}
+
+static float median_of(const float *src, int n) {
+    float t[kMedianN];
+    for (int i = 0; i < n; ++i) t[i] = src[i];
+    for (int i = 1; i < n; ++i) {
+        float k = t[i];
+        int j = i - 1;
+        while (j >= 0 && t[j] > k) { t[j + 1] = t[j]; --j; }
+        t[j + 1] = k;
+    }
+    return t[n / 2];
+}
+
+void update() {
+    if (!g_initialized) return;
+
+    int16_t ax, ay, az;
+    if (!read_accel(ax, ay, az)) return;
     g_last_ay = ay;
     g_last_az = az;
 
+    // 1g gate: drop samples corrupted by linear acceleration / vibration.
+    float mag = sqrtf((float)ax * ax + (float)ay * ay + (float)az * az);
+    if (fabsf(mag - kLsbPerG) > kGateFrac * kLsbPerG) {
+        return;  // keep previous filtered value
+    }
+
     // X is the axis of rotation → only Y and Z carry tilt information.
-    // atan2(az, ay): at home (retracted, ~30°) gravity is mostly in +Y, giving a small
-    // angle. As the board extends toward 60°, az grows and ay shrinks, increasing the angle.
-    return atan2f((float)az, (float)ay) * (180.0f / (float)M_PI) + g_angle_offset;
-}
+    // atan2(az, ay): at home (retracted) gravity is mostly in +Y, giving a small
+    // angle. As the board extends, az grows and ay shrinks, increasing the angle.
+    float raw = atan2f((float)az, (float)ay) * (180.0f / (float)M_PI) + g_angle_offset;
 
-void update(float direction_hint) {
-    if (!g_initialized) return;
-
-    float raw = read_raw_angle();
+    // Stage 1: median window rejects isolated spikes.
+    g_med_win[g_med_idx] = raw;
+    g_med_idx = (g_med_idx + 1) % kMedianN;
+    if (g_med_count < kMedianN) ++g_med_count;
+    float med = median_of(g_med_win, g_med_count);
 
     if (!g_filter_seeded) {
-        g_filtered_angle = raw;
+        g_filtered_angle = med;
         g_filter_seeded = true;
         return;
     }
 
-    // Throttled raw debug log (~every 2 s at 5 Hz update rate).
+    // Stage 2: EMA smoothing.
+    g_filtered_angle = kAlpha * med + (1.0f - kAlpha) * g_filtered_angle;
+
+    // Throttled debug log.
     static uint32_t s_log_tick = 0;
     if (++s_log_tick >= 10) {
         s_log_tick = 0;
-        ESP_LOGI(TAG, "ay=%d az=%d raw=%.1f filtered=%.1f",
-                 (int)g_last_ay, (int)g_last_az, raw, g_filtered_angle);
+        ESP_LOGI(TAG, "ay=%d az=%d med=%.2f filt=%.2f",
+                 (int)ay, (int)az, (double)med, (double)g_filtered_angle);
     }
-
-    // Stage 1: EMA smoothing.
-    float ema = kAlpha * raw + (1.0f - kAlpha) * g_filtered_angle;
-
-    // Stage 2: Directional clamp.  Once moving, the angle must not go
-    // backwards relative to the commanded direction.
-    //   direction_hint > 0 → extending  → angle may only increase
-    //   direction_hint < 0 → retracting → angle may only decrease
-    //   direction_hint == 0 → stopped   → no clamp
-    if (direction_hint > 0.0f && ema < g_filtered_angle) {
-        ema = g_filtered_angle;
-    } else if (direction_hint < 0.0f && ema > g_filtered_angle) {
-        ema = g_filtered_angle;
-    }
-
-    g_filtered_angle = ema;
 }
 
 float read_angle_deg() {

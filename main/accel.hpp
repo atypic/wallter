@@ -7,19 +7,12 @@ namespace wallter::accel {
 // Must be called once before update() / read_angle_deg().
 esp_err_t init();
 
-// Update the filtered angle estimate. Call exactly once per control loop iteration.
+// Update the filtered angle estimate. Call once per control loop iteration.
 //
-// direction_hint:
-//   +1.0f  — motor is extending  (angle must be non-decreasing)
-//   -1.0f  — motor is retracting (angle must be non-increasing)
-//    0.0f  — motor stopped       (EMA runs freely)
-//
-// Two-stage filter:
-//   1. EMA smoothing (alpha = kAlpha) removes high-frequency noise.
-//   2. Directional gate: during motion the filtered value is clamped to only
-//      move in the commanded direction, preventing noise from causing a
-//      premature or wrong-direction stop.
-void update(float direction_hint);
+// Pipeline: 1g-magnitude gate (reject vibration/impact) -> median window
+// (reject impulsive spikes) -> EMA smoothing. Combined with the sensor's
+// hardware oversampling (OSR3).
+void update();
 
 // Returns the last filtered angle in degrees (cached from the most recent update()).
 //

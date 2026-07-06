@@ -784,7 +784,7 @@ void run_test_accel_mode(Services &svc) {
     // Press both buttons simultaneously to exit.
     bool prev_both = false;
     while (1) {
-        wallter::accel::update(0.0f);
+        wallter::accel::update();
         float angle = wallter::accel::read_angle_deg();
 
         char line2[17];
@@ -821,7 +821,7 @@ void run_cal_accel_mode(Services &svc) {
     bool prev_ret = false;
 
     while (1) {
-        wallter::accel::update(0.0f);
+        wallter::accel::update();
         float angle = wallter::accel::read_angle_deg();
 
         char line1[17];
