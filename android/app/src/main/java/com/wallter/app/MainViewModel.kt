@@ -423,6 +423,26 @@ class MainViewModel : ViewModel() {
         settingsSaveResult.value = null
     }
 
+    fun downloadLog(onResult: (String?) -> Unit) {
+        val c = client
+        if (c == null) {
+            settingsSaveResult.value = "Error: not connected"
+            onResult(null)
+            return
+        }
+        viewModelScope.launch {
+            try {
+                lastError.value = null
+                val text = c.downloadLog()
+                onResult(text)
+            } catch (t: Throwable) {
+                lastError.value = t.message ?: t.toString()
+                settingsSaveResult.value = "Log download failed: ${t.message}"
+                onResult(null)
+            }
+        }
+    }
+
     fun startOta(context: Context) {
         val c = client ?: return
         val uri = firmwareUri.value

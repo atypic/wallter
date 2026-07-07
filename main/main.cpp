@@ -17,6 +17,7 @@
 #include "motordriver.hpp"
 #include "factory_test.hpp"
 #include "ble_ota.hpp"
+#include "logbuf.hpp"
 
 static const char *TAG = "main";
 
@@ -130,6 +131,7 @@ static void rebuild_target_table() {
 
 
 extern "C" void app_main(void) {
+    wallter::logbuf::init();
     ESP_LOGI(TAG, "");
     ESP_LOGI(TAG, "========================================");
     ESP_LOGI(TAG, "   WALLTER  %s", VERSION_STRING);

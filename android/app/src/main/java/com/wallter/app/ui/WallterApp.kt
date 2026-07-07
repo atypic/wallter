@@ -98,6 +98,22 @@ fun WallterApp(viewModel: MainViewModel) {
         viewModel.clearSettingsSaveResult()
     }
 
+    var pendingLogText by remember { mutableStateOf<String?>(null) }
+    val saveLogLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.CreateDocument("text/plain")
+    ) { uri ->
+        val text = pendingLogText
+        pendingLogText = null
+        if (uri != null && text != null) {
+            try {
+                context.contentResolver.openOutputStream(uri)?.use {
+                    it.write(text.toByteArray(Charsets.UTF_8))
+                }
+            } catch (_: Exception) {
+            }
+        }
+    }
+
     LaunchedEffect(mode) {
         if (mode == Mode.Maintenance && ui.availableFirmwares.isEmpty() && !ui.isLoadingFirmwares) {
             viewModel.refreshAvailableFirmwares()
@@ -179,6 +195,19 @@ fun WallterApp(viewModel: MainViewModel) {
                     },
                         onSaveName = { viewModel.saveDeviceName(it) },
                     )
+
+                    Spacer(modifier = Modifier.height(8.dp))
+
+                    OutlinedButton(onClick = {
+                        viewModel.downloadLog { text ->
+                            if (text != null) {
+                                pendingLogText = text
+                                saveLogLauncher.launch("wallter-log.txt")
+                            }
+                        }
+                    }) {
+                        Text("Download log")
+                    }
                 }
             }
 

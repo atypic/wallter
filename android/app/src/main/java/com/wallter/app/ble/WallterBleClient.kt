@@ -65,6 +65,7 @@ class WallterBleClient(private val context: Context) {
     private var settings: BluetoothGattCharacteristic? = null
     private var version: BluetoothGattCharacteristic? = null
     private var deviceNameChr: BluetoothGattCharacteristic? = null
+    private var logChr: BluetoothGattCharacteristic? = null
 
     private val opMutex = Mutex()
 
@@ -211,6 +212,7 @@ class WallterBleClient(private val context: Context) {
         settings = null
         version = null
         deviceNameChr = null
+        logChr = null
 
         serviceDiscoveryRetried = false
         lastGattTable = null
@@ -288,6 +290,20 @@ class WallterBleClient(private val context: Context) {
     suspend fun writeDeviceName(name: String) {
         val chr = deviceNameChr ?: throw IOException("Device name characteristic not found")
         writeCharacteristic(chr, name.toByteArray(Charsets.UTF_8))
+    }
+
+    // Downloads the device's in-RAM log. Writes to rewind/snapshot on the device,
+    // then reads MTU-sized chunks until an empty chunk signals end-of-log.
+    suspend fun downloadLog(): String {
+        val chr = logChr ?: throw IOException("Log characteristic not found")
+        writeCharacteristic(chr, byteArrayOf(0x01))
+        val out = StringBuilder()
+        while (true) {
+            val chunk = readCharacteristic(chr)
+            if (chunk.isEmpty()) break
+            out.append(String(chunk, Charsets.UTF_8))
+        }
+        return out.toString()
     }
 
     suspend fun otaBegin(imageSize: Int, sha256: ByteArray?) {
@@ -515,6 +531,7 @@ class WallterBleClient(private val context: Context) {
             settings = findCharacteristicAny(gatt, WallterUuids.SETTINGS)
             version = findCharacteristicAny(gatt, WallterUuids.VERSION)
             deviceNameChr = findCharacteristicAny(gatt, WallterUuids.DEVICE_NAME)
+            logChr = findCharacteristicAny(gatt, WallterUuids.LOG)
 
             if (buttons == null || version == null || settings == null) {
                 Log.e(TAG, "Expected characteristics missing (buttons=${buttons != null} version=${version != null} settings=${settings != null})")

@@ -1,6 +1,7 @@
 #include "ble_ota.hpp"
 
 #include "ota_update.hpp"
+#include "logbuf.hpp"
 
 #include "esp_err.h"
 #include "esp_log.h"
@@ -73,6 +74,10 @@ static const ble_uuid128_t kDevNameUuid = BLE_UUID128_INIT(
     0x9a, 0x9b, 0x5a, 0x7d, 0x4d, 0x2a, 0x4d, 0x2f,
     0x9e, 0x2c, 0x8d, 0x7c, 0x34, 0x02, 0x0A, 0x00);
 
+static const ble_uuid128_t kLogUuid = BLE_UUID128_INIT(
+    0x9a, 0x9b, 0x5a, 0x7d, 0x4d, 0x2a, 0x4d, 0x2f,
+    0x9e, 0x2c, 0x8d, 0x7c, 0x34, 0x02, 0x0B, 0x00);
+
 enum : uint8_t {
     kOpBegin = 0x01,
     kOpData = 0x02,
@@ -116,6 +121,12 @@ static uint8_t g_expected_sha256[32] = {0};
 static uint16_t g_conn_handle = BLE_HS_CONN_HANDLE_NONE;
 static uint16_t g_status_val_handle = 0;
 static uint16_t g_angle_val_handle = 0;
+
+// Log download snapshot: frozen copy served in MTU-sized chunks via repeated
+// reads. A write to the LOG characteristic (re)takes the snapshot and rewinds.
+static uint8_t g_log_snapshot[8192];
+static size_t g_log_snap_len = 0;
+static size_t g_log_cursor = 0;
 
 static volatile uint8_t g_btn_events = 0;
 
@@ -431,6 +442,31 @@ static int gatt_access_version(uint16_t /*conn_handle*/, uint16_t /*attr_handle*
     return BLE_ATT_ERR_UNLIKELY;
 }
 
+static int gatt_access_log(uint16_t /*conn_handle*/, uint16_t /*attr_handle*/,
+                           struct ble_gatt_access_ctxt *ctxt, void * /*arg*/) {
+    if (ctxt->op == BLE_GATT_ACCESS_OP_WRITE_CHR) {
+        // (Re)take a frozen snapshot and rewind the read cursor.
+        g_log_snap_len = wallter::logbuf::snapshot(g_log_snapshot, sizeof(g_log_snapshot));
+        g_log_cursor = 0;
+        return 0;
+    }
+    if (ctxt->op == BLE_GATT_ACCESS_OP_READ_CHR) {
+        // Serve the next chunk. Cap to the negotiated MTU so nothing is dropped;
+        // a zero-length read signals end-of-log.
+        size_t remaining = (g_log_cursor < g_log_snap_len) ? (g_log_snap_len - g_log_cursor) : 0;
+        uint16_t mtu = ble_att_mtu(g_conn_handle);
+        size_t chunk = (mtu > 3) ? (size_t)(mtu - 3) : 20;
+        if (chunk > remaining) chunk = remaining;
+        int rc = 0;
+        if (chunk > 0) {
+            rc = os_mbuf_append(ctxt->om, &g_log_snapshot[g_log_cursor], chunk);
+            if (rc == 0) g_log_cursor += chunk;
+        }
+        return (rc == 0) ? 0 : BLE_ATT_ERR_INSUFFICIENT_RES;
+    }
+    return BLE_ATT_ERR_UNLIKELY;
+}
+
 static int gatt_access_devname(uint16_t /*conn_handle*/, uint16_t /*attr_handle*/,
                                struct ble_gatt_access_ctxt *ctxt, void * /*arg*/) {
     if (ctxt->op == BLE_GATT_ACCESS_OP_READ_CHR) {
@@ -550,6 +586,16 @@ static const struct ble_gatt_svc_def gatt_svcs[] = {
             {
                 .uuid = &kDevNameUuid.u,
                 .access_cb = gatt_access_devname,
+                .arg = nullptr,
+                .descriptors = nullptr,
+                .flags = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_WRITE,
+                .min_key_size = 0,
+                .val_handle = nullptr,
+                .cpfd = nullptr,
+            },
+            {
+                .uuid = &kLogUuid.u,
+                .access_cb = gatt_access_log,
                 .arg = nullptr,
                 .descriptors = nullptr,
                 .flags = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_WRITE,

@@ -16,6 +16,7 @@ object WallterUuids {
     val SETTINGS: UUID = UUID.fromString("00080234-7c8d-2c9e-2f4d-2a4d7d5a9b9a")
     val VERSION: UUID = UUID.fromString("00090234-7c8d-2c9e-2f4d-2a4d7d5a9b9a")
     val DEVICE_NAME: UUID = UUID.fromString("000A0234-7c8d-2c9e-2f4d-2a4d7d5a9b9a")
+    val LOG: UUID = UUID.fromString("000B0234-7c8d-2c9e-2f4d-2a4d7d5a9b9a")
 
     const val OP_BEGIN: Byte = 0x01
     const val OP_END: Byte = 0x03
